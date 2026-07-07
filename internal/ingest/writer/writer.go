@@ -141,6 +141,9 @@ func (w *Writer) flush(ctx context.Context, batch []aisstream.Message) error {
 	if err := w.upsertVessels(ctx, batch, now); err != nil {
 		return fmt.Errorf("upsert vessels: %w", err)
 	}
+	if err := w.upsertLastPositions(ctx, batch, now); err != nil {
+		return fmt.Errorf("upsert last positions: %w", err)
+	}
 
 	w.flushes.Add(1)
 	w.rowsWritten.Add(int64(len(batch)))
@@ -198,4 +201,115 @@ SET name = COALESCE(NULLIF(EXCLUDED.name, ''), vessels.name),
     last_seen_at = EXCLUDED.last_seen_at`
 	_, err := w.pool.Exec(ctx, q, mmsis, names, now)
 	return err
+}
+
+// lastPos is the per-MMSI winning position within a batch.
+type lastPos struct {
+	reported  time.Time
+	lon, lat  float64
+	sog, cog  *float64
+	heading   *int16
+	navStatus *int16
+}
+
+// upsertLastPositions updates the UNLOGGED cache with the newest position per
+// MMSI in the batch. The conditional update guards against an older reordered
+// message overwriting a newer one.
+func (w *Writer) upsertLastPositions(ctx context.Context, batch []aisstream.Message, now time.Time) error {
+	latest := make(map[int64]lastPos, len(batch))
+	order := make([]int64, 0, len(batch))
+	for _, m := range batch {
+		if !m.HasPosition {
+			continue
+		}
+		rep := now
+		if m.HasReported {
+			rep = m.ReportedAt
+		}
+		if cur, seen := latest[m.MMSI]; seen {
+			if cur.reported.After(rep) {
+				continue
+			}
+		} else {
+			order = append(order, m.MMSI)
+		}
+		latest[m.MMSI] = lastPos{
+			reported: rep, lon: m.Lon, lat: m.Lat,
+			sog: m.Sog, cog: m.Cog, heading: m.Heading, navStatus: m.NavStatus,
+		}
+	}
+	if len(order) == 0 {
+		return nil
+	}
+
+	mmsis := make([]int64, len(order))
+	reported := make([]time.Time, len(order))
+	lons := make([]float64, len(order))
+	lats := make([]float64, len(order))
+	sogs := make([]*float64, len(order))
+	cogs := make([]*float64, len(order))
+	headings := make([]*int16, len(order))
+	navs := make([]*int16, len(order))
+	for i, mmsi := range order {
+		r := latest[mmsi]
+		mmsis[i], reported[i] = mmsi, r.reported
+		lons[i], lats[i] = r.lon, r.lat
+		sogs[i], cogs[i] = r.sog, r.cog
+		headings[i], navs[i] = r.heading, r.navStatus
+	}
+
+	const q = `
+INSERT INTO vessel_last_position (mmsi, reported_at, received_at, lon, lat, sog, cog, heading, nav_status)
+SELECT u.mmsi, u.reported_at, $3, u.lon, u.lat, u.sog, u.cog, u.heading, u.nav_status
+FROM unnest($1::bigint[], $2::timestamptz[], $4::float8[], $5::float8[],
+            $6::float4[], $7::float4[], $8::int2[], $9::int2[])
+     AS u(mmsi, reported_at, lon, lat, sog, cog, heading, nav_status)
+ON CONFLICT (mmsi) DO UPDATE
+SET reported_at = EXCLUDED.reported_at,
+    received_at = EXCLUDED.received_at,
+    lon = EXCLUDED.lon, lat = EXCLUDED.lat,
+    sog = EXCLUDED.sog, cog = EXCLUDED.cog,
+    heading = EXCLUDED.heading, nav_status = EXCLUDED.nav_status
+WHERE EXCLUDED.reported_at >= vessel_last_position.reported_at`
+	_, err := w.pool.Exec(ctx, q, mmsis, reported, now, lons, lats, sogs, cogs, headings, navs)
+	return err
+}
+
+// RebuildLastPositions repopulates the cache from raw_ais_messages when it is
+// empty — e.g. after a crash truncated the UNLOGGED table. Motion fields
+// (sog/cog/heading/nav_status) are left NULL and refilled by live updates. In
+// Phase 2 this will rebuild from the positions hypertable instead. It returns
+// the number of rows written.
+func RebuildLastPositions(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) (int64, error) {
+	var existing int64
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM vessel_last_position`).Scan(&existing); err != nil {
+		return 0, fmt.Errorf("count cache: %w", err)
+	}
+	if existing > 0 {
+		return 0, nil // cache warm; nothing to rebuild
+	}
+
+	const q = `
+INSERT INTO vessel_last_position (mmsi, reported_at, received_at, lon, lat)
+SELECT DISTINCT ON (mmsi)
+  mmsi,
+  COALESCE(reported_at, received_at),
+  received_at,
+  (payload->'MetaData'->>'longitude')::float8,
+  (payload->'MetaData'->>'latitude')::float8
+FROM raw_ais_messages
+WHERE message_type IN (1, 2, 3, 18, 19, 27)
+  AND payload->'MetaData'->>'latitude'  IS NOT NULL
+  AND payload->'MetaData'->>'longitude' IS NOT NULL
+ORDER BY mmsi, COALESCE(reported_at, received_at) DESC
+ON CONFLICT (mmsi) DO NOTHING`
+	tag, err := pool.Exec(ctx, q)
+	if err != nil {
+		return 0, fmt.Errorf("rebuild: %w", err)
+	}
+	n := tag.RowsAffected()
+	if n > 0 {
+		logger.Info("rebuilt last-position cache", "rows", n)
+	}
+	return n, nil
 }
