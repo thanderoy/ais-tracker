@@ -199,6 +199,29 @@ func TestDecode(t *testing.T) {
 	}
 }
 
+func TestDecodePosition(t *testing.T) {
+	msg, err := decode("aisstream", []byte(samplePositionReport))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !msg.HasPosition {
+		t.Fatal("expected HasPosition for a PositionReport")
+	}
+	if msg.Lat != 1.29 || msg.Lon != 103.85 {
+		t.Errorf("lat/lon = %v/%v, want 1.29/103.85", msg.Lat, msg.Lon)
+	}
+
+	// A static-data message must not be flagged as carrying a position.
+	static := `{"MessageType":"ShipStaticData","MetaData":{"MMSI":111},"Message":{"ShipStaticData":{"MessageID":5,"UserID":111}}}`
+	sm, err := decode("aisstream", []byte(static))
+	if err != nil {
+		t.Fatalf("decode static: %v", err)
+	}
+	if sm.HasPosition {
+		t.Error("static data should not have a position")
+	}
+}
+
 func TestNextBackoff(t *testing.T) {
 	if got := nextBackoff(1 * time.Second); got != 2*time.Second {
 		t.Errorf("nextBackoff(1s) = %v, want 2s", got)

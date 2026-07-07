@@ -67,6 +67,12 @@ func run() int {
 	}
 	defer pool.Close()
 
+	// Rebuild the UNLOGGED last-position cache if it was truncated by a crash.
+	if _, err := writer.RebuildLastPositions(ctx, pool, logger); err != nil {
+		logger.Error("last-position cache rebuild failed", "err", err)
+		return exitFatalError
+	}
+
 	// Ingest pipeline: AISStream client -> bounded channel -> batched writer.
 	msgs := make(chan aisstream.Message, ingestQueueSize)
 	client := aisstream.New(aisstream.Config{APIKey: cfg.AISStreamAPIKey}, msgs, logger)

@@ -22,6 +22,26 @@ type Message struct {
 	ReportedAt  time.Time       // from MetaData.time_utc; zero if unparseable
 	HasReported bool            // true when ReportedAt was parsed
 	Payload     json.RawMessage // raw envelope JSON
+
+	// Position fields, populated only for position-type messages
+	// (1, 2, 3, 18, 19, 27) that carry a latitude and longitude.
+	HasPosition bool
+	Lat         float64
+	Lon         float64
+	Sog         *float64 // speed over ground, knots
+	Cog         *float64 // course over ground, degrees
+	Heading     *int16   // true heading, degrees
+	NavStatus   *int16   // navigational status
+}
+
+// IsPositionType reports whether an AIS message type carries a position report.
+func IsPositionType(t int) bool {
+	switch t {
+	case 1, 2, 3, 18, 19, 27:
+		return true
+	default:
+		return false
+	}
 }
 
 // envelope is the outer AISStream frame. Message is kept raw (a single-key
@@ -40,6 +60,17 @@ type envelope struct {
 type aisHeader struct {
 	MessageID int   `json:"MessageID"` // numeric AIS type
 	UserID    int64 `json:"UserID"`    // MMSI
+}
+
+// aisPosition captures the position fields shared across position-report types.
+// Pointers distinguish "absent" from a real zero value.
+type aisPosition struct {
+	Latitude           *float64 `json:"Latitude"`
+	Longitude          *float64 `json:"Longitude"`
+	Sog                *float64 `json:"Sog"`
+	Cog                *float64 `json:"Cog"`
+	TrueHeading        *int     `json:"TrueHeading"`
+	NavigationalStatus *int     `json:"NavigationalStatus"`
 }
 
 // decode parses a raw AISStream envelope into a Message. The raw bytes are
@@ -66,6 +97,9 @@ func decode(source string, raw []byte) (Message, error) {
 				msg.MMSI = hdr.UserID
 			}
 		}
+		if IsPositionType(msg.MessageType) {
+			applyPosition(&msg, inner)
+		}
 	}
 
 	if t, err := time.Parse(timeUTCLayout, env.MetaData.TimeUTC); err == nil {
@@ -74,4 +108,29 @@ func decode(source string, raw []byte) (Message, error) {
 	}
 
 	return msg, nil
+}
+
+// applyPosition fills the position fields of msg from a raw inner message. A
+// message is only marked HasPosition when both latitude and longitude parse.
+func applyPosition(msg *Message, inner json.RawMessage) {
+	var p aisPosition
+	if err := json.Unmarshal(inner, &p); err != nil {
+		return
+	}
+	if p.Latitude == nil || p.Longitude == nil {
+		return
+	}
+	msg.HasPosition = true
+	msg.Lat = *p.Latitude
+	msg.Lon = *p.Longitude
+	msg.Sog = p.Sog
+	msg.Cog = p.Cog
+	if p.TrueHeading != nil {
+		h := int16(*p.TrueHeading)
+		msg.Heading = &h
+	}
+	if p.NavigationalStatus != nil {
+		n := int16(*p.NavigationalStatus)
+		msg.NavStatus = &n
+	}
 }

@@ -32,6 +32,110 @@ func mkMsg(mmsi int64, typ int, name string, reported bool) aisstream.Message {
 	return m
 }
 
+func mkPos(mmsi int64, typ int, lat, lon float64, reportedAgo time.Duration) aisstream.Message {
+	sog := 12.5
+	payload := fmt.Sprintf(
+		`{"MessageType":"PositionReport","MetaData":{"MMSI":%d,"latitude":%f,"longitude":%f},"Message":{"PositionReport":{"MessageID":%d,"UserID":%d,"Latitude":%f,"Longitude":%f}}}`,
+		mmsi, lat, lon, typ, mmsi, lat, lon)
+	return aisstream.Message{
+		Source:      "test",
+		MessageType: typ,
+		MMSI:        mmsi,
+		Payload:     json.RawMessage(payload),
+		HasPosition: true,
+		Lat:         lat,
+		Lon:         lon,
+		Sog:         &sog,
+		ReportedAt:  time.Now().UTC().Add(-reportedAgo).Truncate(time.Second),
+		HasReported: true,
+	}
+}
+
+func TestLastPositionCacheAndRebuild(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping container-backed cache test in -short mode")
+	}
+	ctx := context.Background()
+
+	dsn, cleanup, err := testsupport.StartPostgres(ctx)
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(cleanup)
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	msgs := []aisstream.Message{
+		mkPos(100, 1, 1.0, 103.0, 60*time.Second), // older
+		mkPos(100, 1, 2.0, 104.0, 0),              // newer -> wins
+		mkPos(200, 18, 5.0, 120.0, 0),
+	}
+	in := make(chan aisstream.Message, len(msgs))
+	for _, m := range msgs {
+		in <- m
+	}
+	close(in)
+
+	w := New(pool, Config{}, quietLogger())
+	if err := w.Run(ctx, in); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// Live cache: one row per MMSI, newest position wins.
+	assertCache := func(stage string) {
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM vessel_last_position`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 2 {
+			t.Errorf("%s: cache count = %d, want 2", stage, count)
+		}
+		var lat, lon float64
+		if err := pool.QueryRow(ctx, `SELECT lat, lon FROM vessel_last_position WHERE mmsi = 100`).Scan(&lat, &lon); err != nil {
+			t.Fatal(err)
+		}
+		if lat != 2.0 || lon != 104.0 {
+			t.Errorf("%s: mmsi 100 lat/lon = %v/%v, want 2.0/104.0", stage, lat, lon)
+		}
+	}
+	assertCache("live")
+
+	// Verify the table is UNLOGGED (relpersistence 'u').
+	var persistence string
+	if err := pool.QueryRow(ctx, `SELECT relpersistence FROM pg_class WHERE relname='vessel_last_position'`).Scan(&persistence); err != nil {
+		t.Fatal(err)
+	}
+	if persistence != "u" {
+		t.Errorf("relpersistence = %q, want u (unlogged)", persistence)
+	}
+
+	// Simulate a crash truncating the cache, then rebuild from raw messages.
+	if _, err := pool.Exec(ctx, `TRUNCATE vessel_last_position`); err != nil {
+		t.Fatal(err)
+	}
+	n, err := RebuildLastPositions(ctx, pool, quietLogger())
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("rebuild wrote %d rows, want 2", n)
+	}
+	assertCache("rebuilt")
+
+	// Rebuild is a no-op when the cache is already warm.
+	n2, err := RebuildLastPositions(ctx, pool, quietLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n2 != 0 {
+		t.Errorf("second rebuild wrote %d rows, want 0", n2)
+	}
+}
+
 func TestWriterPersistsBatch(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping container-backed writer test in -short mode")
