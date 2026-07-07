@@ -1,0 +1,28 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # golangci-lint v2: gosimple is folded into staticcheck.
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - revive
+    - staticcheck
+    - unused
+  settings:
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: context-as-argument
+        - name: error-return
+        - name: unreachable-code
+  exclusions:
+    rules:
+      # Test files may ignore some returned errors for brevity.
+      - path: _test\.go
+        linters:
+          - errcheck
