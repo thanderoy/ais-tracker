@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/thanderoy/ais-tracker/internal/ingest/aisstream"
+	"github.com/thanderoy/ais-tracker/internal/ingest/dedup"
 	"github.com/thanderoy/ais-tracker/internal/testsupport"
 )
 
@@ -133,6 +134,69 @@ func TestLastPositionCacheAndRebuild(t *testing.T) {
 	}
 	if n2 != 0 {
 		t.Errorf("second rebuild wrote %d rows, want 0", n2)
+	}
+}
+
+func TestWriterTagsDuplicates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping container-backed dedup test in -short mode")
+	}
+	ctx := context.Background()
+
+	dsn, cleanup, err := testsupport.StartPostgres(ctx)
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(cleanup)
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	// BatchSize 1 forces one flush per message, so the second identical message
+	// lands in a later window and is detected as a cross-source duplicate.
+	w := New(pool, Config{BatchSize: 1}, quietLogger(), WithDeduper(dedup.New(pool, quietLogger())))
+
+	msg := mkPos(100, 1, 1.0, 103.0, 0)
+	in := make(chan aisstream.Message, 2)
+	in <- msg
+	in <- msg // identical fingerprint
+	close(in)
+
+	if err := w.Run(ctx, in); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// Both raw rows are stored; exactly one is tagged is_duplicate.
+	var raw, dups int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*), count(*) FILTER (WHERE is_duplicate) FROM raw_ais_messages`,
+	).Scan(&raw, &dups); err != nil {
+		t.Fatal(err)
+	}
+	if raw != 2 {
+		t.Errorf("raw rows = %d, want 2", raw)
+	}
+	if dups != 1 {
+		t.Errorf("duplicate-tagged rows = %d, want 1", dups)
+	}
+
+	// Derived tables reflect only the non-duplicate message.
+	var vessels, positions int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM vessels`).Scan(&vessels); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM vessel_last_position`).Scan(&positions); err != nil {
+		t.Fatal(err)
+	}
+	if vessels != 1 || positions != 1 {
+		t.Errorf("vessels=%d positions=%d, want 1/1", vessels, positions)
+	}
+
+	if got := w.Metrics().Duplicates; got != 1 {
+		t.Errorf("Metrics.Duplicates = %d, want 1", got)
 	}
 }
 
