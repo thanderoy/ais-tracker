@@ -33,6 +33,11 @@ type RateCounter interface {
 	Incr(ctx context.Context, source string, n int64) error
 }
 
+// Deduper flags messages already seen in a rolling window. Optional.
+type Deduper interface {
+	MarkBatch(ctx context.Context, msgs []aisstream.Message) ([]bool, error)
+}
+
 // Option customizes a Writer at construction.
 type Option func(*Writer)
 
@@ -41,12 +46,19 @@ func WithRateCounter(rc RateCounter) Option {
 	return func(w *Writer) { w.counter = rc }
 }
 
+// WithDeduper wires cross-source duplicate detection. Duplicate messages are
+// still stored (tagged is_duplicate) but skipped by downstream upserts.
+func WithDeduper(d Deduper) Option {
+	return func(w *Writer) { w.deduper = d }
+}
+
 // Metrics is a snapshot of writer counters.
 type Metrics struct {
-	Batched      int64 // messages accepted into a batch
-	Flushes      int64 // flush operations performed
-	RowsWritten  int64 // raw rows written via COPY
-	FlushErrors  int64 // failed flushes
+	Batched     int64 // messages accepted into a batch
+	Flushes     int64 // flush operations performed
+	RowsWritten int64 // raw rows written via COPY
+	FlushErrors int64 // failed flushes
+	Duplicates  int64 // messages flagged as cross-source duplicates
 }
 
 // Writer consumes decoded messages and writes them in batches.
@@ -55,11 +67,13 @@ type Writer struct {
 	cfg     Config
 	logger  *slog.Logger
 	counter RateCounter
+	deduper Deduper
 
 	batched     atomic.Int64
 	flushes     atomic.Int64
 	rowsWritten atomic.Int64
 	flushErrors atomic.Int64
+	duplicates  atomic.Int64
 }
 
 // New builds a Writer.
@@ -87,6 +101,7 @@ func (w *Writer) Metrics() Metrics {
 		Flushes:     w.flushes.Load(),
 		RowsWritten: w.rowsWritten.Load(),
 		FlushErrors: w.flushErrors.Load(),
+		Duplicates:  w.duplicates.Load(),
 	}
 }
 
@@ -153,13 +168,17 @@ func (w *Writer) flush(ctx context.Context, batch []aisstream.Message) error {
 	start := time.Now()
 	now := start
 
-	if err := w.copyRaw(ctx, batch, now); err != nil {
+	// Detect duplicates first; they are still stored (tagged) but excluded from
+	// the derived vessels and last-position tables.
+	dup := w.markDuplicates(ctx, batch)
+
+	if err := w.copyRaw(ctx, batch, dup, now); err != nil {
 		return fmt.Errorf("copy raw: %w", err)
 	}
-	if err := w.upsertVessels(ctx, batch, now); err != nil {
+	if err := w.upsertVessels(ctx, batch, dup, now); err != nil {
 		return fmt.Errorf("upsert vessels: %w", err)
 	}
-	if err := w.upsertLastPositions(ctx, batch, now); err != nil {
+	if err := w.upsertLastPositions(ctx, batch, dup, now); err != nil {
 		return fmt.Errorf("upsert last positions: %w", err)
 	}
 
@@ -168,6 +187,28 @@ func (w *Writer) flush(ctx context.Context, batch []aisstream.Message) error {
 	w.recordRate(ctx, batch)
 	w.logger.Debug("writer flushed", "batch", len(batch), "dur", time.Since(start))
 	return nil
+}
+
+// markDuplicates returns a per-message duplicate flag using the optional
+// deduper. On error (or when no deduper is configured) nothing is flagged.
+func (w *Writer) markDuplicates(ctx context.Context, batch []aisstream.Message) []bool {
+	flags := make([]bool, len(batch))
+	if w.deduper == nil {
+		return flags
+	}
+	marked, err := w.deduper.MarkBatch(ctx, batch)
+	if err != nil {
+		w.logger.Debug("dedup check failed", "err", err)
+		return flags
+	}
+	var n int64
+	for _, d := range marked {
+		if d {
+			n++
+		}
+	}
+	w.duplicates.Add(n)
+	return marked
 }
 
 // recordRate bumps the optional per-source counter by this batch's volume.
@@ -186,18 +227,18 @@ func (w *Writer) recordRate(ctx context.Context, batch []aisstream.Message) {
 	}
 }
 
-func (w *Writer) copyRaw(ctx context.Context, batch []aisstream.Message, now time.Time) error {
+func (w *Writer) copyRaw(ctx context.Context, batch []aisstream.Message, dup []bool, now time.Time) error {
 	rows := make([][]any, len(batch))
 	for i, m := range batch {
 		var reported any
 		if m.HasReported {
 			reported = m.ReportedAt
 		}
-		rows[i] = []any{m.Source, int16(m.MessageType), m.MMSI, now, reported, []byte(m.Payload)}
+		rows[i] = []any{m.Source, int16(m.MessageType), m.MMSI, now, reported, []byte(m.Payload), dup[i]}
 	}
 	_, err := w.pool.CopyFrom(ctx,
 		pgx.Identifier{"raw_ais_messages"},
-		[]string{"source", "message_type", "mmsi", "received_at", "reported_at", "payload"},
+		[]string{"source", "message_type", "mmsi", "received_at", "reported_at", "payload", "is_duplicate"},
 		pgx.CopyFromRows(rows),
 	)
 	return err
@@ -206,10 +247,13 @@ func (w *Writer) copyRaw(ctx context.Context, batch []aisstream.Message, now tim
 // upsertVessels writes one row per distinct MMSI in the batch (keeping the last
 // non-empty name), so a single statement never touches the same conflict row
 // twice.
-func (w *Writer) upsertVessels(ctx context.Context, batch []aisstream.Message, now time.Time) error {
+func (w *Writer) upsertVessels(ctx context.Context, batch []aisstream.Message, dup []bool, now time.Time) error {
 	latest := make(map[int64]string, len(batch))
 	order := make([]int64, 0, len(batch))
-	for _, m := range batch {
+	for i, m := range batch {
+		if dup[i] {
+			continue
+		}
 		if _, seen := latest[m.MMSI]; !seen {
 			order = append(order, m.MMSI)
 		}
@@ -218,6 +262,9 @@ func (w *Writer) upsertVessels(ctx context.Context, batch []aisstream.Message, n
 		} else if _, seen := latest[m.MMSI]; !seen {
 			latest[m.MMSI] = ""
 		}
+	}
+	if len(order) == 0 {
+		return nil
 	}
 
 	mmsis := make([]int64, len(order))
@@ -250,11 +297,11 @@ type lastPos struct {
 // upsertLastPositions updates the UNLOGGED cache with the newest position per
 // MMSI in the batch. The conditional update guards against an older reordered
 // message overwriting a newer one.
-func (w *Writer) upsertLastPositions(ctx context.Context, batch []aisstream.Message, now time.Time) error {
+func (w *Writer) upsertLastPositions(ctx context.Context, batch []aisstream.Message, dup []bool, now time.Time) error {
 	latest := make(map[int64]lastPos, len(batch))
 	order := make([]int64, 0, len(batch))
-	for _, m := range batch {
-		if !m.HasPosition {
+	for i, m := range batch {
+		if dup[i] || !m.HasPosition {
 			continue
 		}
 		rep := now
