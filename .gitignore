@@ -1,0 +1,25 @@
+# Local planning docs — kept out of the repo intentionally.
+plan/*
+
+# Build output
+/bin/
+*bin/*
+
+# Go
+*.exe
+*.test
+*.out
+coverage.*
+vendor/
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store

@@ -1,0 +1,36 @@
+name: ais-tracker
+
+services:
+  postgres:
+    build:
+      context: ./postgres
+    image: ais-tracker/postgres:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ais}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ais}
+      POSTGRES_DB: ${POSTGRES_DB:-ais}
+    # Runtime overrides. wal_level=logical + replication slots are required for
+    # the Phase 5 CDC work; they must be set at postmaster start, not via SQL.
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=timescaledb
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=4
+      - -c
+      - max_wal_senders=4
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/home/postgres/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ais} -d ${POSTGRES_DB:-ais}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
