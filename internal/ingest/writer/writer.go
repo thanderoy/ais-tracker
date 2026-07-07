@@ -28,6 +28,19 @@ type Config struct {
 	FlushInterval time.Duration
 }
 
+// RateCounter records per-source ingest volume. Optional.
+type RateCounter interface {
+	Incr(ctx context.Context, source string, n int64) error
+}
+
+// Option customizes a Writer at construction.
+type Option func(*Writer)
+
+// WithRateCounter wires a per-source ingest counter, bumped once per flush.
+func WithRateCounter(rc RateCounter) Option {
+	return func(w *Writer) { w.counter = rc }
+}
+
 // Metrics is a snapshot of writer counters.
 type Metrics struct {
 	Batched      int64 // messages accepted into a batch
@@ -38,9 +51,10 @@ type Metrics struct {
 
 // Writer consumes decoded messages and writes them in batches.
 type Writer struct {
-	pool   *pgxpool.Pool
-	cfg    Config
-	logger *slog.Logger
+	pool    *pgxpool.Pool
+	cfg     Config
+	logger  *slog.Logger
+	counter RateCounter
 
 	batched     atomic.Int64
 	flushes     atomic.Int64
@@ -49,7 +63,7 @@ type Writer struct {
 }
 
 // New builds a Writer.
-func New(pool *pgxpool.Pool, cfg Config, logger *slog.Logger) *Writer {
+func New(pool *pgxpool.Pool, cfg Config, logger *slog.Logger, opts ...Option) *Writer {
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = defaultBatchSize
 	}
@@ -59,7 +73,11 @@ func New(pool *pgxpool.Pool, cfg Config, logger *slog.Logger) *Writer {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Writer{pool: pool, cfg: cfg, logger: logger}
+	w := &Writer{pool: pool, cfg: cfg, logger: logger}
+	for _, opt := range opts {
+		opt(w)
+	}
+	return w
 }
 
 // Metrics returns a snapshot of the writer's counters.
@@ -147,8 +165,25 @@ func (w *Writer) flush(ctx context.Context, batch []aisstream.Message) error {
 
 	w.flushes.Add(1)
 	w.rowsWritten.Add(int64(len(batch)))
+	w.recordRate(ctx, batch)
 	w.logger.Debug("writer flushed", "batch", len(batch), "dur", time.Since(start))
 	return nil
+}
+
+// recordRate bumps the optional per-source counter by this batch's volume.
+func (w *Writer) recordRate(ctx context.Context, batch []aisstream.Message) {
+	if w.counter == nil {
+		return
+	}
+	bySource := make(map[string]int64)
+	for _, m := range batch {
+		bySource[m.Source]++
+	}
+	for source, n := range bySource {
+		if err := w.counter.Incr(ctx, source, n); err != nil {
+			w.logger.Debug("rate counter incr failed", "err", err, "source", source)
+		}
+	}
 }
 
 func (w *Writer) copyRaw(ctx context.Context, batch []aisstream.Message, now time.Time) error {

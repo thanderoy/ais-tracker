@@ -18,6 +18,7 @@ import (
 	"github.com/thanderoy/ais-tracker/internal/config"
 	"github.com/thanderoy/ais-tracker/internal/db"
 	"github.com/thanderoy/ais-tracker/internal/ingest/aisstream"
+	"github.com/thanderoy/ais-tracker/internal/ingest/rate"
 	"github.com/thanderoy/ais-tracker/internal/ingest/writer"
 	applog "github.com/thanderoy/ais-tracker/internal/log"
 )
@@ -76,7 +77,8 @@ func run() int {
 	// Ingest pipeline: AISStream client -> bounded channel -> batched writer.
 	msgs := make(chan aisstream.Message, ingestQueueSize)
 	client := aisstream.New(aisstream.Config{APIKey: cfg.AISStreamAPIKey}, msgs, logger)
-	w := writer.New(pool, writer.Config{}, logger)
+	counter := rate.New(pool, logger)
+	w := writer.New(pool, writer.Config{}, logger, writer.WithRateCounter(counter))
 
 	logger.Info("hello, ready")
 
@@ -84,6 +86,7 @@ func run() int {
 	components := []component{
 		func(ctx context.Context) error { return client.Run(ctx) },
 		func(ctx context.Context) error { return w.Run(ctx, msgs) },
+		func(ctx context.Context) error { return counter.RunHousekeeping(ctx, 0, 0) },
 	}
 
 	return supervise(ctx, cfg.ShutdownGrace, logger, components...)
