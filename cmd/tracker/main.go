@@ -16,8 +16,15 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/thanderoy/ais-tracker/internal/config"
+	"github.com/thanderoy/ais-tracker/internal/db"
+	"github.com/thanderoy/ais-tracker/internal/ingest/aisstream"
+	"github.com/thanderoy/ais-tracker/internal/ingest/writer"
 	applog "github.com/thanderoy/ais-tracker/internal/log"
 )
+
+// ingestQueueSize bounds the client->writer channel. When full, the client
+// drops messages rather than stalling the socket.
+const ingestQueueSize = 4096
 
 // version is overridden at build time via -ldflags "-X main.version=<git sha>".
 var version = "dev"
@@ -52,16 +59,25 @@ func run() int {
 	defer stop()
 
 	logger.Info("service starting", "app_env", cfg.AppEnv, "http_port", cfg.HTTPPort)
+
+	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
+	if err != nil {
+		logger.Error("database connection failed", "err", err)
+		return exitFatalError
+	}
+	defer pool.Close()
+
+	// Ingest pipeline: AISStream client -> bounded channel -> batched writer.
+	msgs := make(chan aisstream.Message, ingestQueueSize)
+	client := aisstream.New(aisstream.Config{APIKey: cfg.AISStreamAPIKey}, msgs, logger)
+	w := writer.New(pool, writer.Config{}, logger)
+
 	logger.Info("hello, ready")
 
-	// Real components (ingest client, workers, API server, NOTIFY listener)
-	// register here in later phases. Each must return when its context is done.
+	// Workers, API server, and NOTIFY listeners register here in later phases.
 	components := []component{
-		func(ctx context.Context) error {
-			<-ctx.Done()
-			logger.Info("component stopped", "component", "root")
-			return nil
-		},
+		func(ctx context.Context) error { return client.Run(ctx) },
+		func(ctx context.Context) error { return w.Run(ctx, msgs) },
 	}
 
 	return supervise(ctx, cfg.ShutdownGrace, logger, components...)
