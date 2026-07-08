@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -209,6 +211,88 @@ func TestWriterWritesPositions(t *testing.T) {
 	}
 	if cog != nil || heading != nil || nav != nil {
 		t.Errorf("optional fields = cog:%v heading:%v nav:%v, want all nil", cog, heading, nav)
+	}
+}
+
+// fakeEnqueuer records the MMSIs handed to it.
+type fakeEnqueuer struct {
+	mu    sync.Mutex
+	mmsis []int64
+}
+
+func (f *fakeEnqueuer) EnqueueEnrichment(_ context.Context, mmsi int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mmsis = append(f.mmsis, mmsi)
+	return nil
+}
+
+func TestWriterEnqueuesEnrichmentOnFirstSighting(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping container-backed enrichment enqueue test in -short mode")
+	}
+	ctx := context.Background()
+
+	dsn, cleanup, err := testsupport.StartPostgres(ctx)
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(cleanup)
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	enq := &fakeEnqueuer{}
+
+	// First flush: MMSIs 100 and 200 are brand new.
+	first := []aisstream.Message{
+		mkMsg(100, 1, "ALPHA", true),
+		mkMsg(100, 1, "", false), // same MMSI in the batch -> still one enqueue
+		mkMsg(200, 5, "BETA", true),
+	}
+	in := make(chan aisstream.Message, len(first))
+	for _, m := range first {
+		in <- m
+	}
+	close(in)
+
+	w := New(pool, Config{}, quietLogger(), WithEnqueuer(enq))
+	if err := w.Run(ctx, in); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// Second flush in a fresh writer: 100 is already known (update, no enqueue),
+	// 300 is new.
+	second := []aisstream.Message{
+		mkMsg(100, 1, "ALPHA", true),
+		mkMsg(300, 3, "GAMMA", true),
+	}
+	in2 := make(chan aisstream.Message, len(second))
+	for _, m := range second {
+		in2 <- m
+	}
+	close(in2)
+	w2 := New(pool, Config{}, quietLogger(), WithEnqueuer(enq))
+	if err := w2.Run(ctx, in2); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+
+	enq.mu.Lock()
+	got := append([]int64(nil), enq.mmsis...)
+	enq.mu.Unlock()
+	slices.Sort(got)
+
+	want := []int64{100, 200, 300}
+	if len(got) != len(want) {
+		t.Fatalf("enqueued MMSIs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("enqueued MMSIs = %v, want %v", got, want)
+		}
 	}
 }
 

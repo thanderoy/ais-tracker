@@ -40,6 +40,12 @@ type Deduper interface {
 	MarkBatch(ctx context.Context, msgs []aisstream.Message) ([]bool, error)
 }
 
+// Enqueuer schedules follow-up work for a newly seen vessel. It is called once
+// per MMSI, the first time that MMSI is inserted into vessels. Optional.
+type Enqueuer interface {
+	EnqueueEnrichment(ctx context.Context, mmsi int64) error
+}
+
 // Option customizes a Writer at construction.
 type Option func(*Writer)
 
@@ -52,6 +58,12 @@ func WithRateCounter(rc RateCounter) Option {
 // still stored (tagged is_duplicate) but skipped by downstream upserts.
 func WithDeduper(d Deduper) Option {
 	return func(w *Writer) { w.deduper = d }
+}
+
+// WithEnqueuer wires follow-up enrichment: every MMSI seen for the first time
+// triggers one enrichment job. Enqueue failures are logged, not fatal.
+func WithEnqueuer(e Enqueuer) Option {
+	return func(w *Writer) { w.enqueuer = e }
 }
 
 // Metrics is a snapshot of writer counters.
@@ -68,9 +80,10 @@ type Metrics struct {
 type Writer struct {
 	pool    *pgxpool.Pool
 	cfg     Config
-	logger  *slog.Logger
-	counter RateCounter
-	deduper Deduper
+	logger   *slog.Logger
+	counter  RateCounter
+	deduper  Deduper
+	enqueuer Enqueuer
 
 	batched     atomic.Int64
 	flushes     atomic.Int64
@@ -184,13 +197,15 @@ func (w *Writer) flush(ctx context.Context, batch []aisstream.Message) error {
 	if err := w.copyPositions(ctx, batch, dup, now); err != nil {
 		return fmt.Errorf("copy positions: %w", err)
 	}
-	if err := w.upsertVessels(ctx, batch, dup, now); err != nil {
+	newMMSIs, err := w.upsertVessels(ctx, batch, dup, now)
+	if err != nil {
 		return fmt.Errorf("upsert vessels: %w", err)
 	}
 	if err := w.upsertLastPositions(ctx, batch, dup, now); err != nil {
 		return fmt.Errorf("upsert last positions: %w", err)
 	}
 
+	w.enqueueEnrichment(ctx, newMMSIs)
 	w.flushes.Add(1)
 	w.rowsWritten.Add(int64(len(batch)))
 	w.recordRate(ctx, batch)
@@ -300,8 +315,9 @@ func narrow(v *float64) *float32 {
 
 // upsertVessels writes one row per distinct MMSI in the batch (keeping the last
 // non-empty name), so a single statement never touches the same conflict row
-// twice.
-func (w *Writer) upsertVessels(ctx context.Context, batch []aisstream.Message, dup []bool, now time.Time) error {
+// twice. It returns the MMSIs that were inserted for the first time (as opposed
+// to updated), detected via the `xmax = 0` trick on the RETURNING clause.
+func (w *Writer) upsertVessels(ctx context.Context, batch []aisstream.Message, dup []bool, now time.Time) ([]int64, error) {
 	latest := make(map[int64]string, len(batch))
 	order := make([]int64, 0, len(batch))
 	for i, m := range batch {
@@ -318,7 +334,7 @@ func (w *Writer) upsertVessels(ctx context.Context, batch []aisstream.Message, d
 		}
 	}
 	if len(order) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	mmsis := make([]int64, len(order))
@@ -334,9 +350,40 @@ SELECT u.mmsi, NULLIF(u.name, ''), $3, $3
 FROM unnest($1::bigint[], $2::text[]) AS u(mmsi, name)
 ON CONFLICT (mmsi) DO UPDATE
 SET name = COALESCE(NULLIF(EXCLUDED.name, ''), vessels.name),
-    last_seen_at = EXCLUDED.last_seen_at`
-	_, err := w.pool.Exec(ctx, q, mmsis, names, now)
-	return err
+    last_seen_at = EXCLUDED.last_seen_at
+RETURNING mmsi, (xmax = 0) AS inserted`
+	rows, err := w.pool.Query(ctx, q, mmsis, names, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var inserted []int64
+	for rows.Next() {
+		var mmsi int64
+		var isNew bool
+		if err := rows.Scan(&mmsi, &isNew); err != nil {
+			return nil, err
+		}
+		if isNew {
+			inserted = append(inserted, mmsi)
+		}
+	}
+	return inserted, rows.Err()
+}
+
+// enqueueEnrichment fires one enrichment job per first-seen MMSI. It is
+// best-effort: a failed enqueue is logged but does not fail the flush, since
+// the raw and derived data is already persisted.
+func (w *Writer) enqueueEnrichment(ctx context.Context, mmsis []int64) {
+	if w.enqueuer == nil || len(mmsis) == 0 {
+		return
+	}
+	for _, mmsi := range mmsis {
+		if err := w.enqueuer.EnqueueEnrichment(ctx, mmsi); err != nil {
+			w.logger.Debug("enqueue enrichment failed", "err", err, "mmsi", mmsi)
+		}
+	}
 }
 
 // lastPos is the per-MMSI winning position within a batch.
