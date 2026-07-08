@@ -1,6 +1,8 @@
 // Package writer persists decoded AIS messages to Postgres in batches. Raw
-// messages go into raw_ais_messages via the COPY protocol; vessel sightings are
-// upserted into vessels. Batches flush on size or interval, whichever is first.
+// messages go into raw_ais_messages via the COPY protocol; position reports are
+// appended to the positions hypertable; vessel sightings are upserted into
+// vessels and the vessel_last_position cache. Batches flush on size or interval,
+// whichever is first.
 package writer
 
 import (
@@ -59,6 +61,7 @@ type Metrics struct {
 	RowsWritten int64 // raw rows written via COPY
 	FlushErrors int64 // failed flushes
 	Duplicates  int64 // messages flagged as cross-source duplicates
+	Positions   int64 // position rows written to the hypertable
 }
 
 // Writer consumes decoded messages and writes them in batches.
@@ -74,6 +77,7 @@ type Writer struct {
 	rowsWritten atomic.Int64
 	flushErrors atomic.Int64
 	duplicates  atomic.Int64
+	positions   atomic.Int64
 }
 
 // New builds a Writer.
@@ -102,6 +106,7 @@ func (w *Writer) Metrics() Metrics {
 		RowsWritten: w.rowsWritten.Load(),
 		FlushErrors: w.flushErrors.Load(),
 		Duplicates:  w.duplicates.Load(),
+		Positions:   w.positions.Load(),
 	}
 }
 
@@ -161,19 +166,23 @@ func (w *Writer) finalFlush(buf []aisstream.Message) {
 	}
 }
 
-// flush writes one batch: all raw messages via COPY, then a deduplicated vessel
-// upsert. The two writes are independent and not wrapped in one transaction —
-// cache/derived staleness is acceptable and coupling them wastes throughput.
+// flush writes one batch: all raw messages via COPY, position reports appended
+// to the hypertable, then deduplicated vessel and last-position upserts. The
+// writes are independent and not wrapped in one transaction — cache/derived
+// staleness is acceptable and coupling them wastes throughput.
 func (w *Writer) flush(ctx context.Context, batch []aisstream.Message) error {
 	start := time.Now()
 	now := start
 
 	// Detect duplicates first; they are still stored (tagged) but excluded from
-	// the derived vessels and last-position tables.
+	// the derived positions, vessels, and last-position tables.
 	dup := w.markDuplicates(ctx, batch)
 
 	if err := w.copyRaw(ctx, batch, dup, now); err != nil {
 		return fmt.Errorf("copy raw: %w", err)
+	}
+	if err := w.copyPositions(ctx, batch, dup, now); err != nil {
+		return fmt.Errorf("copy positions: %w", err)
 	}
 	if err := w.upsertVessels(ctx, batch, dup, now); err != nil {
 		return fmt.Errorf("upsert vessels: %w", err)
@@ -242,6 +251,51 @@ func (w *Writer) copyRaw(ctx context.Context, batch []aisstream.Message, dup []b
 		pgx.CopyFromRows(rows),
 	)
 	return err
+}
+
+// copyPositions appends one row per non-duplicate position report to the
+// positions hypertable via COPY. reported_at is the hypertable's partition key
+// and is NOT NULL, so messages that carry a position but no parsed timestamp
+// fall back to the receive time. sog/cog are narrowed to float32 to match the
+// REAL columns — binary COPY requires the wire type to match the column exactly.
+func (w *Writer) copyPositions(ctx context.Context, batch []aisstream.Message, dup []bool, now time.Time) error {
+	rows := make([][]any, 0, len(batch))
+	for i, m := range batch {
+		if dup[i] || !m.HasPosition {
+			continue
+		}
+		reported := now
+		if m.HasReported {
+			reported = m.ReportedAt
+		}
+		rows = append(rows, []any{
+			m.MMSI, reported, now, m.Source, m.Lon, m.Lat,
+			narrow(m.Sog), narrow(m.Cog), m.Heading, m.NavStatus,
+		})
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	n, err := w.pool.CopyFrom(ctx,
+		pgx.Identifier{"positions"},
+		[]string{"mmsi", "reported_at", "received_at", "source", "lon", "lat", "sog", "cog", "heading", "nav_status"},
+		pgx.CopyFromRows(rows),
+	)
+	if err != nil {
+		return err
+	}
+	w.positions.Add(n)
+	return nil
+}
+
+// narrow converts an optional float64 to an optional float32 so it matches a
+// REAL column under binary COPY. A nil input stays NULL.
+func narrow(v *float64) *float32 {
+	if v == nil {
+		return nil
+	}
+	f := float32(*v)
+	return &f
 }
 
 // upsertVessels writes one row per distinct MMSI in the batch (keeping the last
