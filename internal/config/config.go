@@ -19,6 +19,7 @@ type Config struct {
 	LogFormat       string        // text | json
 	ShutdownGrace   time.Duration // bounded graceful-shutdown window
 	AISStreamAPIKey string        // optional; anonymous connections allowed
+	WorkerPoolSize  int           // River worker concurrency per queue
 }
 
 // loader accumulates validation errors so Load reports every problem at once
@@ -83,6 +84,7 @@ func Load() (*Config, error) {
 		LogFormat:       l.enum("LOG_FORMAT", "text", "text", "json"),
 		ShutdownGrace:   time.Duration(l.optionalInt("SHUTDOWN_GRACE_SECONDS", 30)) * time.Second,
 		AISStreamAPIKey: os.Getenv("AISSTREAM_API_KEY"),
+		WorkerPoolSize:  l.optionalInt("WORKER_POOL_SIZE", 10),
 	}
 
 	if cfg.DatabaseURL != "" {
@@ -92,6 +94,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.HTTPPort < 1 || cfg.HTTPPort > 65535 {
 		l.fail("HTTP_PORT must be between 1 and 65535, got %d", cfg.HTTPPort)
+	}
+	if cfg.WorkerPoolSize < 1 {
+		l.fail("WORKER_POOL_SIZE must be at least 1, got %d", cfg.WorkerPoolSize)
 	}
 
 	if len(l.errs) > 0 {
