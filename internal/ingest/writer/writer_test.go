@@ -212,6 +212,83 @@ func TestWriterWritesPositions(t *testing.T) {
 	}
 }
 
+func TestVoyageHourlyAggregate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping container-backed continuous aggregate test in -short mode")
+	}
+	ctx := context.Background()
+
+	dsn, cleanup, err := testsupport.StartPostgres(ctx)
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(cleanup)
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	// Three positions for one vessel and one for another, all within the past
+	// few minutes so they share (at most two adjacent) hourly buckets.
+	msgs := []aisstream.Message{
+		mkPos(100, 1, 1.0, 103.0, 3*time.Minute),
+		mkPos(100, 1, 1.1, 103.1, 2*time.Minute),
+		mkPos(100, 1, 1.2, 103.2, 1*time.Minute),
+		mkPos(200, 18, 5.0, 120.0, 1*time.Minute),
+	}
+	in := make(chan aisstream.Message, len(msgs))
+	for _, m := range msgs {
+		in <- m
+	}
+	close(in)
+
+	w := New(pool, Config{}, quietLogger())
+	if err := w.Run(ctx, in); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// The refresh policy job is registered.
+	var jobs int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM timescaledb_information.jobs
+		 WHERE proc_name = 'policy_refresh_continuous_aggregate'
+		   AND hypertable_name = 'voyage_hourly'`,
+	).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if jobs != 1 {
+		t.Errorf("refresh policy jobs = %d, want 1", jobs)
+	}
+
+	// Materialize the aggregate over the full range (auto-commit; refresh cannot
+	// run inside a transaction).
+	if _, err := pool.Exec(ctx, `CALL refresh_continuous_aggregate('voyage_hourly', NULL, NULL)`); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	// Summed across buckets: vessel 100 has 3 positions, vessel 200 has 1.
+	assert := func(mmsi int64, wantCount int64) {
+		var count int64
+		var maxSog float64
+		if err := pool.QueryRow(ctx,
+			`SELECT COALESCE(sum(position_count), 0), COALESCE(max(max_sog), 0)
+			 FROM voyage_hourly WHERE mmsi = $1`, mmsi,
+		).Scan(&count, &maxSog); err != nil {
+			t.Fatal(err)
+		}
+		if count != wantCount {
+			t.Errorf("mmsi %d position_count = %d, want %d", mmsi, count, wantCount)
+		}
+		if maxSog != 12.5 {
+			t.Errorf("mmsi %d max_sog = %v, want 12.5", mmsi, maxSog)
+		}
+	}
+	assert(100, 3)
+	assert(200, 1)
+}
+
 func TestWriterTagsDuplicates(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping container-backed dedup test in -short mode")
