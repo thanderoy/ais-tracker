@@ -22,6 +22,7 @@ import (
 	"github.com/thanderoy/ais-tracker/internal/ingest/rate"
 	"github.com/thanderoy/ais-tracker/internal/ingest/writer"
 	applog "github.com/thanderoy/ais-tracker/internal/log"
+	"github.com/thanderoy/ais-tracker/internal/workers/enrich"
 	"github.com/thanderoy/ais-tracker/internal/workers/queue"
 )
 
@@ -82,13 +83,16 @@ func run() int {
 		logger.Error("job queue migration failed", "err", err)
 		return exitFatalError
 	}
-	q, err := queue.New(pool, queue.Config{MaxWorkers: cfg.WorkerPoolSize}, logger)
+	q, err := queue.New(pool, queue.Config{MaxWorkers: cfg.WorkerPoolSize}, logger,
+		enrich.Register(pool, logger),
+	)
 	if err != nil {
 		logger.Error("job queue init failed", "err", err)
 		return exitFatalError
 	}
 
 	// Ingest pipeline: AISStream client -> bounded channel -> batched writer.
+	// First sightings enqueue vessel enrichment through the queue.
 	msgs := make(chan aisstream.Message, ingestQueueSize)
 	client := aisstream.New(aisstream.Config{APIKey: cfg.AISStreamAPIKey}, msgs, logger)
 	counter := rate.New(pool, logger)
@@ -96,6 +100,7 @@ func run() int {
 	w := writer.New(pool, writer.Config{}, logger,
 		writer.WithRateCounter(counter),
 		writer.WithDeduper(deduper),
+		writer.WithEnqueuer(enrich.NewEnqueuer(q)),
 	)
 
 	logger.Info("hello, ready")
