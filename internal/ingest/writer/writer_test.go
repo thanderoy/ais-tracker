@@ -137,6 +137,81 @@ func TestLastPositionCacheAndRebuild(t *testing.T) {
 	}
 }
 
+func TestWriterWritesPositions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping container-backed positions test in -short mode")
+	}
+	ctx := context.Background()
+
+	dsn, cleanup, err := testsupport.StartPostgres(ctx)
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(cleanup)
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	msgs := []aisstream.Message{
+		mkPos(100, 1, 1.0, 103.0, 60*time.Second),
+		mkPos(100, 1, 2.0, 104.0, 0),
+		mkPos(200, 18, 5.0, 120.0, 0),
+		mkMsg(300, 5, "STATIC", true), // static data, not a position report
+	}
+	in := make(chan aisstream.Message, len(msgs))
+	for _, m := range msgs {
+		in <- m
+	}
+	close(in)
+
+	w := New(pool, Config{}, quietLogger())
+	if err := w.Run(ctx, in); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// Only the three position reports land in the hypertable.
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM positions`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Errorf("positions count = %d, want 3", count)
+	}
+	if got := w.Metrics().Positions; got != 3 {
+		t.Errorf("Metrics.Positions = %d, want 3", got)
+	}
+
+	// positions is a TimescaleDB hypertable.
+	var isHyper bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'positions')`,
+	).Scan(&isHyper); err != nil {
+		t.Fatal(err)
+	}
+	if !isHyper {
+		t.Error("positions is not a hypertable")
+	}
+
+	// sog is populated; cog/heading/nav_status stay NULL when the message omits them.
+	var sog *float32
+	var cog *float32
+	var heading, nav *int16
+	if err := pool.QueryRow(ctx,
+		`SELECT sog, cog, heading, nav_status FROM positions WHERE mmsi = 200 LIMIT 1`,
+	).Scan(&sog, &cog, &heading, &nav); err != nil {
+		t.Fatal(err)
+	}
+	if sog == nil || *sog != 12.5 {
+		t.Errorf("sog = %v, want 12.5", sog)
+	}
+	if cog != nil || heading != nil || nav != nil {
+		t.Errorf("optional fields = cog:%v heading:%v nav:%v, want all nil", cog, heading, nav)
+	}
+}
+
 func TestWriterTagsDuplicates(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping container-backed dedup test in -short mode")
