@@ -30,6 +30,21 @@ const image = "timescale/timescaledb-ha:pg16"
 // applies every repository migration, and returns the connection DSN plus a
 // cleanup func.
 func StartPostgres(ctx context.Context) (dsn string, cleanup func(), err error) {
+	dsn, cleanup, err = StartRawPostgres(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := applyMigrations(dsn); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("apply migrations: %w", err)
+	}
+	return dsn, cleanup, nil
+}
+
+// StartRawPostgres launches the same container with all required extensions but
+// applies no migrations. Tests that drive migrations themselves (the migration
+// round-trip test) use this so they start from an empty, extension-ready schema.
+func StartRawPostgres(ctx context.Context) (dsn string, cleanup func(), err error) {
 	initScript, err := extensionsScript()
 	if err != nil {
 		return "", nil, err
@@ -55,11 +70,6 @@ func StartPostgres(ctx context.Context) (dsn string, cleanup func(), err error) 
 	if err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("connection string: %w", err)
-	}
-
-	if err := applyMigrations(dsn); err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("apply migrations: %w", err)
 	}
 	return dsn, cleanup, nil
 }

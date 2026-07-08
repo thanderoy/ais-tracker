@@ -4,15 +4,14 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
-	"time"
 
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
+	"github.com/thanderoy/ais-tracker/internal/testsupport"
 )
 
-// TestMigrateRoundTrip spins up an ephemeral Postgres and proves the baseline
-// migration applies and rolls back cleanly: up -> down -> up.
+// TestMigrateRoundTrip spins up an ephemeral, extension-ready Postgres and
+// proves every migration applies and the last one rolls back cleanly:
+// up -> down -> up. It uses the same TimescaleDB image as the rest of the
+// suite so migrations that create hypertables and continuous aggregates run.
 func TestMigrateRoundTrip(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping container-backed migration test in -short mode")
@@ -20,26 +19,11 @@ func TestMigrateRoundTrip(t *testing.T) {
 
 	ctx := context.Background()
 
-	pg, err := postgres.Run(ctx,
-		"postgres:16-alpine",
-		postgres.WithDatabase("ais"),
-		postgres.WithUsername("ais"),
-		postgres.WithPassword("ais"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(60*time.Second),
-		),
-	)
+	dsn, cleanup, err := testsupport.StartRawPostgres(ctx)
 	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
+		t.Fatalf("start postgres: %v", err)
 	}
-	t.Cleanup(func() { _ = pg.Terminate(ctx) })
-
-	dsn, err := pg.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("connection string: %v", err)
-	}
+	t.Cleanup(cleanup)
 
 	dir, err := filepath.Abs(filepath.Join("..", "..", "migrations"))
 	if err != nil {
