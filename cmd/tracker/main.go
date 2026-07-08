@@ -22,6 +22,7 @@ import (
 	"github.com/thanderoy/ais-tracker/internal/ingest/rate"
 	"github.com/thanderoy/ais-tracker/internal/ingest/writer"
 	applog "github.com/thanderoy/ais-tracker/internal/log"
+	"github.com/thanderoy/ais-tracker/internal/workers/backfill"
 	"github.com/thanderoy/ais-tracker/internal/workers/enrich"
 	"github.com/thanderoy/ais-tracker/internal/workers/queue"
 )
@@ -85,6 +86,7 @@ func run() int {
 	}
 	q, err := queue.New(pool, queue.Config{MaxWorkers: cfg.WorkerPoolSize}, logger,
 		enrich.Register(pool, logger),
+		backfill.Register(pool, logger, time.Hour),
 	)
 	if err != nil {
 		logger.Error("job queue init failed", "err", err)
