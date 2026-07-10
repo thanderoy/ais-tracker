@@ -36,21 +36,23 @@ together in a single system.
 ## Layout
 
 ```
-cmd/tracker/       main long-running service
-cmd/migrate/       migration runner
-cmd/seed-ports/    World Port Index loader
-cmd/seed-eez/      Marine Regions EEZ loader
-internal/ais/      AIS decoders + models
-internal/db/       pgx pool, sqlc-generated code
-internal/ingest/   source clients + writer
-internal/reference/ port + EEZ reference-data loaders
-internal/workers/  queue workers
-internal/api/      HTTP + WebSocket handlers
-internal/config/   env config loader
-internal/log/      slog setup
-migrations/        golang-migrate SQL files
-deploy/            docker-compose, Dockerfiles
-docs/              architecture notes
+cmd/tracker/           main long-running service
+cmd/migrate/           migration runner
+cmd/seed-ports/        World Port Index loader
+cmd/seed-eez/          Marine Regions EEZ loader
+cmd/download-sanctions/ OFAC SDN download + refresh
+internal/ais/          AIS decoders + models
+internal/db/           pgx pool, sqlc-generated code
+internal/ingest/       source clients + writer
+internal/reference/    port + EEZ reference-data loaders
+internal/enrichment/   operator dedup + sanctions feed
+internal/workers/      queue workers
+internal/api/          HTTP + WebSocket handlers (search, hierarchy)
+internal/config/       env config loader
+internal/log/          slog setup
+migrations/            golang-migrate SQL files
+deploy/                docker-compose, Dockerfiles
+docs/                  architecture notes
 ```
 
 ## Spatial analytics (PostGIS)
@@ -83,12 +85,36 @@ GIST-assisted query reconciled idempotently into its table:
   finds vessel pairs held within 500m and under 3kn for 30+ minutes, excluding
   pier-side vessels inside a port polygon.
 
+## Search, dedup, hierarchies, sanctions
+
+Four more Postgres capabilities cover the "we replaced Elasticsearch, a fuzzy
+matcher, a graph database, and a federated query layer with one Postgres" story:
+
+- **Full-text search** — `vessels.search_doc` is a generated `tsvector`
+  (name/call-sign/flag, weighted, `simple` config) with a GIN index.
+  `internal/api/search` turns user input into a sanitised prefix `tsquery` and
+  ranks with `ts_rank_cd`.
+- **Fuzzy operator dedup** (`pg_trgm`) — `internal/enrichment/operators` folds
+  free-text operator names ("MSC", "Mediterranean Shipping Co") to one canonical
+  row: exact alias match, then trigram similarity above 0.5, else a new operator
+  with grey-zone candidates queued for human review.
+- **Ownership hierarchies** (recursive CTEs) — `internal/api/hierarchy` walks the
+  `operators.parent_id` tree: every vessel a group controls, or an operator's
+  chain up to its ultimate parent. A trigger rejects cycles.
+- **Destination normalization** (`destination_hints`, every 15m) — resolves
+  hand-typed AIS destinations to ports by blending UN/LOCODE, trigram, an
+  abbreviation subsequence probe (SNGP → SINGAPORE), and a junk filter.
+- **Sanctions via FDW** — the OFAC SDN list is a `file_fdw` foreign table
+  projected to the `sanctions_vessels` materialized view; a daily worker
+  (`vessel_sanctions`) trigram/call-sign matches vessels against it.
+  `download-sanctions` refreshes the feed.
+
 ## Background jobs (SKIP LOCKED)
 
 Work that doesn't belong on the hot ingest path — vessel enrichment, gap
-backfill, port-call detection, geofence evaluation, and ship-to-ship transfer
-detection — runs on a Postgres-backed job queue via
-[River](https://riverqueue.com/). River is built
+backfill, port-call detection, geofence evaluation, ship-to-ship transfer
+detection, destination normalization, and sanctions matching — runs on a
+Postgres-backed job queue via [River](https://riverqueue.com/). River is built
 on `SELECT ... FOR UPDATE SKIP LOCKED`: many workers concurrently claim rows
 from the jobs table, and `SKIP LOCKED` makes each worker step over rows another
 worker has already locked instead of blocking on them. The result is that N
@@ -122,6 +148,13 @@ go run ./cmd/seed-ports -file wpi.csv        # World Port Index
 go run ./cmd/seed-eez   -file eez.geojson    # Marine Regions EEZs
 ```
 
+Refresh the OFAC sanctions feed (writes the CSV the `file_fdw` foreign table
+reads — must be on the database server's filesystem — and refreshes the view):
+
+```sh
+go run ./cmd/download-sanctions   # daily, via cron/systemd-timer
+```
+
 ### Configuration
 
 Configuration is read from the environment (see `internal/config`). Key vars:
@@ -136,10 +169,11 @@ Configuration is read from the environment (see `internal/config`). Key vars:
 
 ## Status
 
-Phases 0–3 complete: foundations, live ingest (JSONB raw store, UNLOGGED
+Phases 0–4 complete: foundations, live ingest (JSONB raw store, UNLOGGED
 caches/counters), the positions hypertable with compression/retention and an
-hourly continuous aggregate, the SKIP LOCKED job queue with enrichment and
-backfill workers, and PostGIS spatial analytics — port/EEZ reference data plus
-port-call, geofence-crossing, and ship-to-ship-transfer detection workers. See
-`plan/WORKPLAN.md` for the full, phase-by-phase plan (kept locally, outside
-version control).
+hourly continuous aggregate, the SKIP LOCKED job queue, PostGIS spatial
+analytics (port/EEZ reference data plus port-call, geofence, and STS detection),
+and the search/dedup/hierarchy/FDW layer — full-text vessel search, `pg_trgm`
+operator dedup, recursive-CTE ownership hierarchies, destination normalization,
+and OFAC sanctions matching via `file_fdw`. See `plan/WORKPLAN.md` for the full,
+phase-by-phase plan (kept locally, outside version control).
