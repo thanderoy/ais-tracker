@@ -24,7 +24,10 @@ import (
 	applog "github.com/thanderoy/ais-tracker/internal/log"
 	"github.com/thanderoy/ais-tracker/internal/workers/backfill"
 	"github.com/thanderoy/ais-tracker/internal/workers/enrich"
+	"github.com/thanderoy/ais-tracker/internal/workers/geofence"
+	"github.com/thanderoy/ais-tracker/internal/workers/portcall"
 	"github.com/thanderoy/ais-tracker/internal/workers/queue"
+	"github.com/thanderoy/ais-tracker/internal/workers/sts"
 )
 
 // ingestQueueSize bounds the client->writer channel. When full, the client
@@ -87,6 +90,9 @@ func run() int {
 	q, err := queue.New(pool, queue.Config{MaxWorkers: cfg.WorkerPoolSize}, logger,
 		enrich.Register(pool, logger),
 		backfill.Register(pool, logger, time.Hour),
+		portcall.Register(pool, logger, 5*time.Minute, 6*time.Hour, 15*time.Minute),
+		geofence.Register(pool, logger, time.Minute, 10*time.Minute),
+		sts.Register(pool, logger, 10*time.Minute, time.Hour),
 	)
 	if err != nil {
 		logger.Error("job queue init failed", "err", err)
