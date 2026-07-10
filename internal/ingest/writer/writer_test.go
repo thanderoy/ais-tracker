@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -135,6 +137,240 @@ func TestLastPositionCacheAndRebuild(t *testing.T) {
 	if n2 != 0 {
 		t.Errorf("second rebuild wrote %d rows, want 0", n2)
 	}
+}
+
+func TestWriterWritesPositions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping container-backed positions test in -short mode")
+	}
+	ctx := context.Background()
+
+	dsn, cleanup, err := testsupport.StartPostgres(ctx)
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(cleanup)
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	msgs := []aisstream.Message{
+		mkPos(100, 1, 1.0, 103.0, 60*time.Second),
+		mkPos(100, 1, 2.0, 104.0, 0),
+		mkPos(200, 18, 5.0, 120.0, 0),
+		mkMsg(300, 5, "STATIC", true), // static data, not a position report
+	}
+	in := make(chan aisstream.Message, len(msgs))
+	for _, m := range msgs {
+		in <- m
+	}
+	close(in)
+
+	w := New(pool, Config{}, quietLogger())
+	if err := w.Run(ctx, in); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// Only the three position reports land in the hypertable.
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM positions`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Errorf("positions count = %d, want 3", count)
+	}
+	if got := w.Metrics().Positions; got != 3 {
+		t.Errorf("Metrics.Positions = %d, want 3", got)
+	}
+
+	// positions is a TimescaleDB hypertable.
+	var isHyper bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'positions')`,
+	).Scan(&isHyper); err != nil {
+		t.Fatal(err)
+	}
+	if !isHyper {
+		t.Error("positions is not a hypertable")
+	}
+
+	// sog is populated; cog/heading/nav_status stay NULL when the message omits them.
+	var sog *float32
+	var cog *float32
+	var heading, nav *int16
+	if err := pool.QueryRow(ctx,
+		`SELECT sog, cog, heading, nav_status FROM positions WHERE mmsi = 200 LIMIT 1`,
+	).Scan(&sog, &cog, &heading, &nav); err != nil {
+		t.Fatal(err)
+	}
+	if sog == nil || *sog != 12.5 {
+		t.Errorf("sog = %v, want 12.5", sog)
+	}
+	if cog != nil || heading != nil || nav != nil {
+		t.Errorf("optional fields = cog:%v heading:%v nav:%v, want all nil", cog, heading, nav)
+	}
+}
+
+// fakeEnqueuer records the MMSIs handed to it.
+type fakeEnqueuer struct {
+	mu    sync.Mutex
+	mmsis []int64
+}
+
+func (f *fakeEnqueuer) EnqueueEnrichment(_ context.Context, mmsi int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mmsis = append(f.mmsis, mmsi)
+	return nil
+}
+
+func TestWriterEnqueuesEnrichmentOnFirstSighting(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping container-backed enrichment enqueue test in -short mode")
+	}
+	ctx := context.Background()
+
+	dsn, cleanup, err := testsupport.StartPostgres(ctx)
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(cleanup)
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	enq := &fakeEnqueuer{}
+
+	// First flush: MMSIs 100 and 200 are brand new.
+	first := []aisstream.Message{
+		mkMsg(100, 1, "ALPHA", true),
+		mkMsg(100, 1, "", false), // same MMSI in the batch -> still one enqueue
+		mkMsg(200, 5, "BETA", true),
+	}
+	in := make(chan aisstream.Message, len(first))
+	for _, m := range first {
+		in <- m
+	}
+	close(in)
+
+	w := New(pool, Config{}, quietLogger(), WithEnqueuer(enq))
+	if err := w.Run(ctx, in); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// Second flush in a fresh writer: 100 is already known (update, no enqueue),
+	// 300 is new.
+	second := []aisstream.Message{
+		mkMsg(100, 1, "ALPHA", true),
+		mkMsg(300, 3, "GAMMA", true),
+	}
+	in2 := make(chan aisstream.Message, len(second))
+	for _, m := range second {
+		in2 <- m
+	}
+	close(in2)
+	w2 := New(pool, Config{}, quietLogger(), WithEnqueuer(enq))
+	if err := w2.Run(ctx, in2); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+
+	enq.mu.Lock()
+	got := append([]int64(nil), enq.mmsis...)
+	enq.mu.Unlock()
+	slices.Sort(got)
+
+	want := []int64{100, 200, 300}
+	if len(got) != len(want) {
+		t.Fatalf("enqueued MMSIs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("enqueued MMSIs = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestVoyageHourlyAggregate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping container-backed continuous aggregate test in -short mode")
+	}
+	ctx := context.Background()
+
+	dsn, cleanup, err := testsupport.StartPostgres(ctx)
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(cleanup)
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	// Three positions for one vessel and one for another, all within the past
+	// few minutes so they share (at most two adjacent) hourly buckets.
+	msgs := []aisstream.Message{
+		mkPos(100, 1, 1.0, 103.0, 3*time.Minute),
+		mkPos(100, 1, 1.1, 103.1, 2*time.Minute),
+		mkPos(100, 1, 1.2, 103.2, 1*time.Minute),
+		mkPos(200, 18, 5.0, 120.0, 1*time.Minute),
+	}
+	in := make(chan aisstream.Message, len(msgs))
+	for _, m := range msgs {
+		in <- m
+	}
+	close(in)
+
+	w := New(pool, Config{}, quietLogger())
+	if err := w.Run(ctx, in); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// The refresh policy job is registered.
+	var jobs int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM timescaledb_information.jobs
+		 WHERE proc_name = 'policy_refresh_continuous_aggregate'
+		   AND hypertable_name = 'voyage_hourly'`,
+	).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if jobs != 1 {
+		t.Errorf("refresh policy jobs = %d, want 1", jobs)
+	}
+
+	// Materialize the aggregate over the full range (auto-commit; refresh cannot
+	// run inside a transaction).
+	if _, err := pool.Exec(ctx, `CALL refresh_continuous_aggregate('voyage_hourly', NULL, NULL)`); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	// Summed across buckets: vessel 100 has 3 positions, vessel 200 has 1.
+	assert := func(mmsi int64, wantCount int64) {
+		var count int64
+		var maxSog float64
+		if err := pool.QueryRow(ctx,
+			`SELECT COALESCE(sum(position_count), 0), COALESCE(max(max_sog), 0)
+			 FROM voyage_hourly WHERE mmsi = $1`, mmsi,
+		).Scan(&count, &maxSog); err != nil {
+			t.Fatal(err)
+		}
+		if count != wantCount {
+			t.Errorf("mmsi %d position_count = %d, want %d", mmsi, count, wantCount)
+		}
+		if maxSog != 12.5 {
+			t.Errorf("mmsi %d max_sog = %v, want 12.5", mmsi, maxSog)
+		}
+	}
+	assert(100, 3)
+	assert(200, 1)
 }
 
 func TestWriterTagsDuplicates(t *testing.T) {

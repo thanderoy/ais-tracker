@@ -1,6 +1,8 @@
 // Package writer persists decoded AIS messages to Postgres in batches. Raw
-// messages go into raw_ais_messages via the COPY protocol; vessel sightings are
-// upserted into vessels. Batches flush on size or interval, whichever is first.
+// messages go into raw_ais_messages via the COPY protocol; position reports are
+// appended to the positions hypertable; vessel sightings are upserted into
+// vessels and the vessel_last_position cache. Batches flush on size or interval,
+// whichever is first.
 package writer
 
 import (
@@ -38,6 +40,12 @@ type Deduper interface {
 	MarkBatch(ctx context.Context, msgs []aisstream.Message) ([]bool, error)
 }
 
+// Enqueuer schedules follow-up work for a newly seen vessel. It is called once
+// per MMSI, the first time that MMSI is inserted into vessels. Optional.
+type Enqueuer interface {
+	EnqueueEnrichment(ctx context.Context, mmsi int64) error
+}
+
 // Option customizes a Writer at construction.
 type Option func(*Writer)
 
@@ -52,6 +60,12 @@ func WithDeduper(d Deduper) Option {
 	return func(w *Writer) { w.deduper = d }
 }
 
+// WithEnqueuer wires follow-up enrichment: every MMSI seen for the first time
+// triggers one enrichment job. Enqueue failures are logged, not fatal.
+func WithEnqueuer(e Enqueuer) Option {
+	return func(w *Writer) { w.enqueuer = e }
+}
+
 // Metrics is a snapshot of writer counters.
 type Metrics struct {
 	Batched     int64 // messages accepted into a batch
@@ -59,21 +73,24 @@ type Metrics struct {
 	RowsWritten int64 // raw rows written via COPY
 	FlushErrors int64 // failed flushes
 	Duplicates  int64 // messages flagged as cross-source duplicates
+	Positions   int64 // position rows written to the hypertable
 }
 
 // Writer consumes decoded messages and writes them in batches.
 type Writer struct {
 	pool    *pgxpool.Pool
 	cfg     Config
-	logger  *slog.Logger
-	counter RateCounter
-	deduper Deduper
+	logger   *slog.Logger
+	counter  RateCounter
+	deduper  Deduper
+	enqueuer Enqueuer
 
 	batched     atomic.Int64
 	flushes     atomic.Int64
 	rowsWritten atomic.Int64
 	flushErrors atomic.Int64
 	duplicates  atomic.Int64
+	positions   atomic.Int64
 }
 
 // New builds a Writer.
@@ -102,6 +119,7 @@ func (w *Writer) Metrics() Metrics {
 		RowsWritten: w.rowsWritten.Load(),
 		FlushErrors: w.flushErrors.Load(),
 		Duplicates:  w.duplicates.Load(),
+		Positions:   w.positions.Load(),
 	}
 }
 
@@ -161,27 +179,33 @@ func (w *Writer) finalFlush(buf []aisstream.Message) {
 	}
 }
 
-// flush writes one batch: all raw messages via COPY, then a deduplicated vessel
-// upsert. The two writes are independent and not wrapped in one transaction —
-// cache/derived staleness is acceptable and coupling them wastes throughput.
+// flush writes one batch: all raw messages via COPY, position reports appended
+// to the hypertable, then deduplicated vessel and last-position upserts. The
+// writes are independent and not wrapped in one transaction — cache/derived
+// staleness is acceptable and coupling them wastes throughput.
 func (w *Writer) flush(ctx context.Context, batch []aisstream.Message) error {
 	start := time.Now()
 	now := start
 
 	// Detect duplicates first; they are still stored (tagged) but excluded from
-	// the derived vessels and last-position tables.
+	// the derived positions, vessels, and last-position tables.
 	dup := w.markDuplicates(ctx, batch)
 
 	if err := w.copyRaw(ctx, batch, dup, now); err != nil {
 		return fmt.Errorf("copy raw: %w", err)
 	}
-	if err := w.upsertVessels(ctx, batch, dup, now); err != nil {
+	if err := w.copyPositions(ctx, batch, dup, now); err != nil {
+		return fmt.Errorf("copy positions: %w", err)
+	}
+	newMMSIs, err := w.upsertVessels(ctx, batch, dup, now)
+	if err != nil {
 		return fmt.Errorf("upsert vessels: %w", err)
 	}
 	if err := w.upsertLastPositions(ctx, batch, dup, now); err != nil {
 		return fmt.Errorf("upsert last positions: %w", err)
 	}
 
+	w.enqueueEnrichment(ctx, newMMSIs)
 	w.flushes.Add(1)
 	w.rowsWritten.Add(int64(len(batch)))
 	w.recordRate(ctx, batch)
@@ -244,10 +268,56 @@ func (w *Writer) copyRaw(ctx context.Context, batch []aisstream.Message, dup []b
 	return err
 }
 
+// copyPositions appends one row per non-duplicate position report to the
+// positions hypertable via COPY. reported_at is the hypertable's partition key
+// and is NOT NULL, so messages that carry a position but no parsed timestamp
+// fall back to the receive time. sog/cog are narrowed to float32 to match the
+// REAL columns — binary COPY requires the wire type to match the column exactly.
+func (w *Writer) copyPositions(ctx context.Context, batch []aisstream.Message, dup []bool, now time.Time) error {
+	rows := make([][]any, 0, len(batch))
+	for i, m := range batch {
+		if dup[i] || !m.HasPosition {
+			continue
+		}
+		reported := now
+		if m.HasReported {
+			reported = m.ReportedAt
+		}
+		rows = append(rows, []any{
+			m.MMSI, reported, now, m.Source, m.Lon, m.Lat,
+			narrow(m.Sog), narrow(m.Cog), m.Heading, m.NavStatus,
+		})
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	n, err := w.pool.CopyFrom(ctx,
+		pgx.Identifier{"positions"},
+		[]string{"mmsi", "reported_at", "received_at", "source", "lon", "lat", "sog", "cog", "heading", "nav_status"},
+		pgx.CopyFromRows(rows),
+	)
+	if err != nil {
+		return err
+	}
+	w.positions.Add(n)
+	return nil
+}
+
+// narrow converts an optional float64 to an optional float32 so it matches a
+// REAL column under binary COPY. A nil input stays NULL.
+func narrow(v *float64) *float32 {
+	if v == nil {
+		return nil
+	}
+	f := float32(*v)
+	return &f
+}
+
 // upsertVessels writes one row per distinct MMSI in the batch (keeping the last
 // non-empty name), so a single statement never touches the same conflict row
-// twice.
-func (w *Writer) upsertVessels(ctx context.Context, batch []aisstream.Message, dup []bool, now time.Time) error {
+// twice. It returns the MMSIs that were inserted for the first time (as opposed
+// to updated), detected via the `xmax = 0` trick on the RETURNING clause.
+func (w *Writer) upsertVessels(ctx context.Context, batch []aisstream.Message, dup []bool, now time.Time) ([]int64, error) {
 	latest := make(map[int64]string, len(batch))
 	order := make([]int64, 0, len(batch))
 	for i, m := range batch {
@@ -264,7 +334,7 @@ func (w *Writer) upsertVessels(ctx context.Context, batch []aisstream.Message, d
 		}
 	}
 	if len(order) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	mmsis := make([]int64, len(order))
@@ -280,9 +350,40 @@ SELECT u.mmsi, NULLIF(u.name, ''), $3, $3
 FROM unnest($1::bigint[], $2::text[]) AS u(mmsi, name)
 ON CONFLICT (mmsi) DO UPDATE
 SET name = COALESCE(NULLIF(EXCLUDED.name, ''), vessels.name),
-    last_seen_at = EXCLUDED.last_seen_at`
-	_, err := w.pool.Exec(ctx, q, mmsis, names, now)
-	return err
+    last_seen_at = EXCLUDED.last_seen_at
+RETURNING mmsi, (xmax = 0) AS inserted`
+	rows, err := w.pool.Query(ctx, q, mmsis, names, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var inserted []int64
+	for rows.Next() {
+		var mmsi int64
+		var isNew bool
+		if err := rows.Scan(&mmsi, &isNew); err != nil {
+			return nil, err
+		}
+		if isNew {
+			inserted = append(inserted, mmsi)
+		}
+	}
+	return inserted, rows.Err()
+}
+
+// enqueueEnrichment fires one enrichment job per first-seen MMSI. It is
+// best-effort: a failed enqueue is logged but does not fail the flush, since
+// the raw and derived data is already persisted.
+func (w *Writer) enqueueEnrichment(ctx context.Context, mmsis []int64) {
+	if w.enqueuer == nil || len(mmsis) == 0 {
+		return
+	}
+	for _, mmsi := range mmsis {
+		if err := w.enqueuer.EnqueueEnrichment(ctx, mmsi); err != nil {
+			w.logger.Debug("enqueue enrichment failed", "err", err, "mmsi", mmsi)
+		}
+	}
 }
 
 // lastPos is the per-MMSI winning position within a batch.

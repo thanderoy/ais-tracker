@@ -20,20 +20,45 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// StartPostgres launches a postgres:16-alpine container, applies every
-// repository migration, and returns the connection DSN plus a cleanup func.
-//
-// Phase 1 migrations only need core Postgres, so the alpine image suffices.
-// Phase 2+ migrations that require TimescaleDB/PostGIS will need a richer image.
+// image is the Postgres image used for all integration tests. We use the
+// TimescaleDB HA image (which also bundles PostGIS and pgvector) so that every
+// repository migration applies, including the Phase 2 hypertable and the
+// PostGIS/vector objects added later.
+const image = "timescale/timescaledb-ha:pg16"
+
+// StartPostgres launches a Postgres container with all required extensions,
+// applies every repository migration, and returns the connection DSN plus a
+// cleanup func.
 func StartPostgres(ctx context.Context) (dsn string, cleanup func(), err error) {
-	container, err := postgres.Run(ctx, "postgres:16-alpine",
+	dsn, cleanup, err = StartRawPostgres(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := applyMigrations(dsn); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("apply migrations: %w", err)
+	}
+	return dsn, cleanup, nil
+}
+
+// StartRawPostgres launches the same container with all required extensions but
+// applies no migrations. Tests that drive migrations themselves (the migration
+// round-trip test) use this so they start from an empty, extension-ready schema.
+func StartRawPostgres(ctx context.Context) (dsn string, cleanup func(), err error) {
+	initScript, err := extensionsScript()
+	if err != nil {
+		return "", nil, err
+	}
+
+	container, err := postgres.Run(ctx, image,
 		postgres.WithDatabase("ais"),
 		postgres.WithUsername("ais"),
 		postgres.WithPassword("ais"),
+		postgres.WithInitScripts(initScript),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(60*time.Second),
+				WithStartupTimeout(180*time.Second),
 		),
 	)
 	if err != nil {
@@ -45,11 +70,6 @@ func StartPostgres(ctx context.Context) (dsn string, cleanup func(), err error) 
 	if err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("connection string: %w", err)
-	}
-
-	if err := applyMigrations(dsn); err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("apply migrations: %w", err)
 	}
 	return dsn, cleanup, nil
 }
@@ -73,10 +93,29 @@ func applyMigrations(dsn string) error {
 
 // migrationsDir resolves <repo>/migrations relative to this source file.
 func migrationsDir() (string, error) {
+	root, err := repoRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "migrations"), nil
+}
+
+// extensionsScript resolves the first-boot extension init SQL, reused from the
+// compose stack so tests install the same extension set as production.
+func extensionsScript() (string, error) {
+	root, err := repoRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "deploy", "postgres", "init", "00-extensions.sql"), nil
+}
+
+// repoRoot resolves the repository root relative to this source file.
+func repoRoot() (string, error) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		return "", errors.New("cannot resolve caller path")
 	}
 	// thisFile == <repo>/internal/testsupport/postgres.go
-	return filepath.Join(filepath.Dir(thisFile), "..", "..", "migrations"), nil
+	return filepath.Join(filepath.Dir(thisFile), "..", ".."), nil
 }

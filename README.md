@@ -50,24 +50,53 @@ deploy/         docker-compose, Dockerfiles
 docs/           architecture notes
 ```
 
-## Running
+## Background jobs (SKIP LOCKED)
 
-> The Postgres stack (`deploy/docker-compose.yml`) lands in issue P0-2, and
-> migrations in P0-3. Until then, `make build` and `make run` work against the
-> scaffold.
+Work that doesn't belong on the hot ingest path — vessel enrichment, gap
+backfill, and (later) geofence evaluation and alert dispatch — runs on a
+Postgres-backed job queue via [River](https://riverqueue.com/). River is built
+on `SELECT ... FOR UPDATE SKIP LOCKED`: many workers concurrently claim rows
+from the jobs table, and `SKIP LOCKED` makes each worker step over rows another
+worker has already locked instead of blocking on them. The result is that N
+workers drain a queue with no double-processing and no lock contention, which is
+exactly what a queue needs — and it's all just Postgres, no broker.
+
+`internal/workers/queue/naive/` contains a ~60-line hand-rolled version of the
+same primitive, kept as a readable reference for what River does under the hood.
+
+River owns and versions its own schema (the `river_job` family), so those
+migrations run through River's migrator at startup rather than the
+golang-migrate set under `migrations/`.
+
+## Running
 
 ```sh
 make build          # compile binaries into ./bin
-make run            # run the tracker (currently prints "hello, ready")
+make run            # run the tracker service
 make test           # run tests with the race detector
 make lint           # golangci-lint
 
-make compose-up     # start local Postgres with all extensions   (P0-2)
-make migrate-up     # apply migrations                            (P0-3)
+make compose-up     # start local Postgres with all extensions
+make migrate-up     # apply migrations
 make compose-down   # stop the stack
 ```
 
+### Configuration
+
+Configuration is read from the environment (see `internal/config`). Key vars:
+
+| Var | Default | Meaning |
+|---|---|---|
+| `DATABASE_URL` | — (required) | pgx connection string |
+| `AISSTREAM_API_KEY` | — | AISStream feed key (anonymous if unset) |
+| `WORKER_POOL_SIZE` | `10` | River worker concurrency per queue |
+| `LOG_LEVEL` / `LOG_FORMAT` | `info` / `text` | structured logging |
+| `SHUTDOWN_GRACE_SECONDS` | `30` | bounded graceful-shutdown window |
+
 ## Status
 
-Phase 0 — Foundations, in progress. See `plan/WORKPLAN.md` for the full,
-phase-by-phase plan (kept locally, outside version control).
+Phases 0–2 complete: foundations, live ingest (JSONB raw store, UNLOGGED
+caches/counters), the positions hypertable with compression/retention and an
+hourly continuous aggregate, and the SKIP LOCKED job queue with enrichment and
+backfill workers. See `plan/WORKPLAN.md` for the full, phase-by-phase plan
+(kept locally, outside version control).
