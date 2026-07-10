@@ -212,6 +212,28 @@ func TestWriterWritesPositions(t *testing.T) {
 	if cog != nil || heading != nil || nav != nil {
 		t.Errorf("optional fields = cog:%v heading:%v nav:%v, want all nil", cog, heading, nav)
 	}
+
+	// The geog column is populated from lon/lat automatically: on positions by
+	// the BEFORE INSERT trigger, on vessel_last_position by the generated column.
+	// Every position report must have a non-NULL point matching its coordinates.
+	var nullGeog int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM positions WHERE geog IS NULL`).Scan(&nullGeog); err != nil {
+		t.Fatal(err)
+	}
+	if nullGeog != 0 {
+		t.Errorf("positions with NULL geog = %d, want 0", nullGeog)
+	}
+	for _, table := range []string{"positions", "vessel_last_position"} {
+		var pt string
+		if err := pool.QueryRow(ctx,
+			fmt.Sprintf(`SELECT ST_AsText(geog::geometry) FROM %s WHERE mmsi = 200 LIMIT 1`, table),
+		).Scan(&pt); err != nil {
+			t.Fatalf("%s geog: %v", table, err)
+		}
+		if pt != "POINT(120 5)" { // lon, lat order
+			t.Errorf("%s mmsi 200 geog = %q, want POINT(120 5)", table, pt)
+		}
+	}
 }
 
 // fakeEnqueuer records the MMSIs handed to it.
