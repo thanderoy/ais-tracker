@@ -22,6 +22,9 @@ import (
 	"github.com/thanderoy/ais-tracker/internal/ingest/rate"
 	"github.com/thanderoy/ais-tracker/internal/ingest/writer"
 	applog "github.com/thanderoy/ais-tracker/internal/log"
+	"github.com/thanderoy/ais-tracker/internal/workers/backfill"
+	"github.com/thanderoy/ais-tracker/internal/workers/enrich"
+	"github.com/thanderoy/ais-tracker/internal/workers/queue"
 )
 
 // ingestQueueSize bounds the client->writer channel. When full, the client
@@ -75,7 +78,23 @@ func run() int {
 		return exitFatalError
 	}
 
+	// The job queue owns its own schema (river_job and friends); migrate it
+	// before building the client.
+	if err := queue.Migrate(ctx, pool); err != nil {
+		logger.Error("job queue migration failed", "err", err)
+		return exitFatalError
+	}
+	q, err := queue.New(pool, queue.Config{MaxWorkers: cfg.WorkerPoolSize}, logger,
+		enrich.Register(pool, logger),
+		backfill.Register(pool, logger, time.Hour),
+	)
+	if err != nil {
+		logger.Error("job queue init failed", "err", err)
+		return exitFatalError
+	}
+
 	// Ingest pipeline: AISStream client -> bounded channel -> batched writer.
+	// First sightings enqueue vessel enrichment through the queue.
 	msgs := make(chan aisstream.Message, ingestQueueSize)
 	client := aisstream.New(aisstream.Config{APIKey: cfg.AISStreamAPIKey}, msgs, logger)
 	counter := rate.New(pool, logger)
@@ -83,6 +102,7 @@ func run() int {
 	w := writer.New(pool, writer.Config{}, logger,
 		writer.WithRateCounter(counter),
 		writer.WithDeduper(deduper),
+		writer.WithEnqueuer(enrich.NewEnqueuer(q)),
 	)
 
 	logger.Info("hello, ready")
@@ -93,6 +113,7 @@ func run() int {
 		func(ctx context.Context) error { return w.Run(ctx, msgs) },
 		func(ctx context.Context) error { return counter.RunHousekeeping(ctx, 0, 0) },
 		func(ctx context.Context) error { return deduper.RunHousekeeping(ctx, 0, 0) },
+		func(ctx context.Context) error { return q.Run(ctx) },
 	}
 
 	return supervise(ctx, cfg.ShutdownGrace, logger, components...)
