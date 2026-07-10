@@ -36,25 +36,59 @@ together in a single system.
 ## Layout
 
 ```
-cmd/tracker/    main long-running service
-cmd/migrate/    migration runner
-internal/ais/   AIS decoders + models
-internal/db/    pgx pool, sqlc-generated code
-internal/ingest/  source clients + writer
-internal/workers/ queue workers
-internal/api/   HTTP + WebSocket handlers
-internal/config/  env config loader
-internal/log/   slog setup
-migrations/     golang-migrate SQL files
-deploy/         docker-compose, Dockerfiles
-docs/           architecture notes
+cmd/tracker/       main long-running service
+cmd/migrate/       migration runner
+cmd/seed-ports/    World Port Index loader
+cmd/seed-eez/      Marine Regions EEZ loader
+internal/ais/      AIS decoders + models
+internal/db/       pgx pool, sqlc-generated code
+internal/ingest/   source clients + writer
+internal/reference/ port + EEZ reference-data loaders
+internal/workers/  queue workers
+internal/api/      HTTP + WebSocket handlers
+internal/config/   env config loader
+internal/log/      slog setup
+migrations/        golang-migrate SQL files
+deploy/            docker-compose, Dockerfiles
+docs/              architecture notes
 ```
+
+## Spatial analytics (PostGIS)
+
+Every position carries a `geog geography(Point, 4326)` alongside its raw
+`lon`/`lat`, so distances come out in metres on the globe. On `positions` (a
+compressed hypertable, where TimescaleDB disallows generated columns) it is
+filled by a `BEFORE INSERT` trigger — COPY fires row triggers, so the batched
+writer stays on the fast path; on the plain `vessel_last_position` cache it is a
+`GENERATED ... STORED` column. Everything is GIST-indexed.
+
+Two reference datasets are loaded by one-shot, idempotent seed commands:
+
+- **Ports** — the NGA World Port Index (~3,700 ports). Each port gets a centroid
+  and a fallback buffered-centroid polygon. `seed-ports -file wpi.csv`
+  ([dataset](https://msi.nga.mil/Publications/WPI)).
+- **EEZs** — Marine Regions Exclusive Economic Zones (~280 multipolygons).
+  `seed-eez -file eez.geojson` ([dataset](https://marineregions.org)).
+
+Three periodic workers run the spatial-temporal analysis, each as a single
+GIST-assisted query reconciled idempotently into its table:
+
+- **Port calls** (`port_calls`, every 5m) — tags recent positions with the port
+  they sit inside, run-length-encodes each vessel's stream into contiguous
+  in-port visits, and opens/closes calls. Transits under 15 minutes are dropped.
+- **Geofence crossings** (`geofence_events`, every 1m) — walks positions with
+  `LAG` over inside/outside state against user-defined watch polygons and records
+  enter/exit events, firing `NOTIFY 'geofence_events'` for each.
+- **Ship-to-ship transfers** (`sts_events`, every 10m) — a spatial self-join
+  finds vessel pairs held within 500m and under 3kn for 30+ minutes, excluding
+  pier-side vessels inside a port polygon.
 
 ## Background jobs (SKIP LOCKED)
 
 Work that doesn't belong on the hot ingest path — vessel enrichment, gap
-backfill, and (later) geofence evaluation and alert dispatch — runs on a
-Postgres-backed job queue via [River](https://riverqueue.com/). River is built
+backfill, port-call detection, geofence evaluation, and ship-to-ship transfer
+detection — runs on a Postgres-backed job queue via
+[River](https://riverqueue.com/). River is built
 on `SELECT ... FOR UPDATE SKIP LOCKED`: many workers concurrently claim rows
 from the jobs table, and `SKIP LOCKED` makes each worker step over rows another
 worker has already locked instead of blocking on them. The result is that N
@@ -81,6 +115,13 @@ make migrate-up     # apply migrations
 make compose-down   # stop the stack
 ```
 
+Load the spatial reference data (after `make migrate-up`):
+
+```sh
+go run ./cmd/seed-ports -file wpi.csv        # World Port Index
+go run ./cmd/seed-eez   -file eez.geojson    # Marine Regions EEZs
+```
+
 ### Configuration
 
 Configuration is read from the environment (see `internal/config`). Key vars:
@@ -95,8 +136,10 @@ Configuration is read from the environment (see `internal/config`). Key vars:
 
 ## Status
 
-Phases 0–2 complete: foundations, live ingest (JSONB raw store, UNLOGGED
+Phases 0–3 complete: foundations, live ingest (JSONB raw store, UNLOGGED
 caches/counters), the positions hypertable with compression/retention and an
-hourly continuous aggregate, and the SKIP LOCKED job queue with enrichment and
-backfill workers. See `plan/WORKPLAN.md` for the full, phase-by-phase plan
-(kept locally, outside version control).
+hourly continuous aggregate, the SKIP LOCKED job queue with enrichment and
+backfill workers, and PostGIS spatial analytics — port/EEZ reference data plus
+port-call, geofence-crossing, and ship-to-ship-transfer detection workers. See
+`plan/WORKPLAN.md` for the full, phase-by-phase plan (kept locally, outside
+version control).
