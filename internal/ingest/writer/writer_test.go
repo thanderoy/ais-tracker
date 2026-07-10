@@ -393,6 +393,19 @@ func TestVoyageHourlyAggregate(t *testing.T) {
 	}
 	assert(100, 3)
 	assert(200, 1)
+
+	// The hourly track is the ordered LineString of the vessel's points. Vessel
+	// 100's three positions contribute three vertices (across at most two
+	// adjacent buckets), built from the geog column via ST_MakeLine.
+	var vertices int
+	if err := pool.QueryRow(ctx,
+		`SELECT COALESCE(sum(ST_NPoints(track)), 0) FROM voyage_hourly WHERE mmsi = 100`,
+	).Scan(&vertices); err != nil {
+		t.Fatal(err)
+	}
+	if vertices != 3 {
+		t.Errorf("mmsi 100 track vertices = %d, want 3", vertices)
+	}
 }
 
 func TestWriterTagsDuplicates(t *testing.T) {
