@@ -16,6 +16,8 @@ export
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/tracker ./cmd/tracker
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/migrate ./cmd/migrate
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/seed-ports ./cmd/seed-ports
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/seed-eez ./cmd/seed-eez
 
 ## run: run the tracker service
 run:
