@@ -22,8 +22,10 @@ import (
 	"github.com/thanderoy/ais-tracker/internal/ingest/rate"
 	"github.com/thanderoy/ais-tracker/internal/ingest/writer"
 	applog "github.com/thanderoy/ais-tracker/internal/log"
+	"github.com/thanderoy/ais-tracker/internal/workers/anomaly"
 	"github.com/thanderoy/ais-tracker/internal/workers/backfill"
 	"github.com/thanderoy/ais-tracker/internal/workers/destnorm"
+	"github.com/thanderoy/ais-tracker/internal/workers/embed"
 	"github.com/thanderoy/ais-tracker/internal/workers/enrich"
 	"github.com/thanderoy/ais-tracker/internal/workers/geofence"
 	"github.com/thanderoy/ais-tracker/internal/workers/portcall"
@@ -97,6 +99,8 @@ func run() int {
 		sts.Register(pool, logger, 10*time.Minute, time.Hour),
 		destnorm.Register(pool, logger, 15*time.Minute, 24*time.Hour),
 		sanctions.Register(pool, logger, 24*time.Hour),
+		embed.Register(pool, logger, 24*time.Hour, 7*24*time.Hour, 50),
+		anomaly.Register(pool, logger, 24*time.Hour),
 	)
 	if err != nil {
 		logger.Error("job queue init failed", "err", err)
