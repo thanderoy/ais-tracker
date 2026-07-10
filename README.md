@@ -47,7 +47,9 @@ internal/ingest/       source clients + writer
 internal/reference/    port + EEZ reference-data loaders
 internal/enrichment/   operator dedup + sanctions feed
 internal/workers/      queue workers
-internal/api/          HTTP + WebSocket handlers (search, hierarchy)
+internal/api/          HTTP + WebSocket handlers (search, hierarchy, similar)
+internal/notify/       LISTEN/NOTIFY listener + alert dispatch adapters
+internal/cdc/          wal2json logical replication consumer
 internal/config/       env config loader
 internal/log/          slog setup
 migrations/            golang-migrate SQL files
@@ -109,12 +111,32 @@ matcher, a graph database, and a federated query layer with one Postgres" story:
   (`vessel_sanctions`) trigram/call-sign matches vessels against it.
   `download-sanctions` refreshes the feed.
 
+## Vectors, real-time alerts, CDC
+
+- **Trajectory embeddings** (`pgvector`) — a nightly worker embeds each vessel's
+  recent movement as a 64-d vector (`gridcell_v1`: a feature-hashed histogram of
+  the 1°×1° cells it visited), HNSW-indexed. `internal/api/similar` answers
+  "vessels moving like this one"; an anomaly worker scores each vessel by mean
+  cosine distance from its own history. See [docs/embeddings.md](docs/embeddings.md).
+- **AIS gap detection** (`ais_gaps`, every 30m) — flags recently-active vessels
+  that go dark (excluding the truly gone and the in-port) and closes gaps on
+  reappearance, tagging `reappeared_far` vs `reappeared_same_area`.
+- **LISTEN/NOTIFY alerts** — triggers `pg_notify` on geofence crossings, AIS
+  gaps, and more; `internal/notify` holds a dedicated LISTEN connection
+  (reconnecting on loss) and a router that fans events out to dispatch adapters
+  (stdout, Telegram) with retry and a dead-letter table.
+- **Change data capture** (logical replication) — `internal/cdc` streams
+  inserts/updates on the high-signal tables out of a **wal2json** replication
+  slot: durable and replayable, unlike NOTIFY. See
+  [docs/replication.md](docs/replication.md) for the slot-management runbook.
+
 ## Background jobs (SKIP LOCKED)
 
 Work that doesn't belong on the hot ingest path — vessel enrichment, gap
 backfill, port-call detection, geofence evaluation, ship-to-ship transfer
-detection, destination normalization, and sanctions matching — runs on a
-Postgres-backed job queue via [River](https://riverqueue.com/). River is built
+detection, destination normalization, sanctions matching, trajectory
+embedding, anomaly scoring, and AIS-gap detection — runs on a Postgres-backed
+job queue via [River](https://riverqueue.com/). River is built
 on `SELECT ... FOR UPDATE SKIP LOCKED`: many workers concurrently claim rows
 from the jobs table, and `SKIP LOCKED` makes each worker step over rows another
 worker has already locked instead of blocking on them. The result is that N
@@ -166,14 +188,23 @@ Configuration is read from the environment (see `internal/config`). Key vars:
 | `WORKER_POOL_SIZE` | `10` | River worker concurrency per queue |
 | `LOG_LEVEL` / `LOG_FORMAT` | `info` / `text` | structured logging |
 | `SHUTDOWN_GRACE_SECONDS` | `30` | bounded graceful-shutdown window |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | — | enable the Telegram alert adapter (both required) |
+
+CDC self-enables when the database runs with `wal_level=logical` (the compose
+stack sets it); otherwise the service logs `CDC disabled` and runs without the
+replication stream.
 
 ## Status
 
-Phases 0–4 complete: foundations, live ingest (JSONB raw store, UNLOGGED
+Phases 0–5 complete: foundations, live ingest (JSONB raw store, UNLOGGED
 caches/counters), the positions hypertable with compression/retention and an
 hourly continuous aggregate, the SKIP LOCKED job queue, PostGIS spatial
 analytics (port/EEZ reference data plus port-call, geofence, and STS detection),
-and the search/dedup/hierarchy/FDW layer — full-text vessel search, `pg_trgm`
-operator dedup, recursive-CTE ownership hierarchies, destination normalization,
-and OFAC sanctions matching via `file_fdw`. See `plan/WORKPLAN.md` for the full,
-phase-by-phase plan (kept locally, outside version control).
+the search/dedup/hierarchy/FDW layer (full-text search, `pg_trgm` operator
+dedup, recursive-CTE hierarchies, destination normalization, OFAC sanctions via
+`file_fdw`), and the vectors/real-time/CDC layer — `pgvector` trajectory
+embeddings with similarity and anomaly scoring, AIS-gap detection, a
+LISTEN/NOTIFY alert pipeline with dispatch adapters, and a wal2json logical
+replication event stream. Only Phase 6 (API + dashboard) remains. See
+`plan/WORKPLAN.md` for the full, phase-by-phase plan (kept locally, outside
+version control).
