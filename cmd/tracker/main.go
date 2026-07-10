@@ -23,6 +23,7 @@ import (
 	"github.com/thanderoy/ais-tracker/internal/ingest/writer"
 	applog "github.com/thanderoy/ais-tracker/internal/log"
 	"github.com/thanderoy/ais-tracker/internal/workers/backfill"
+	"github.com/thanderoy/ais-tracker/internal/workers/destnorm"
 	"github.com/thanderoy/ais-tracker/internal/workers/enrich"
 	"github.com/thanderoy/ais-tracker/internal/workers/geofence"
 	"github.com/thanderoy/ais-tracker/internal/workers/portcall"
@@ -93,6 +94,7 @@ func run() int {
 		portcall.Register(pool, logger, 5*time.Minute, 6*time.Hour, 15*time.Minute),
 		geofence.Register(pool, logger, time.Minute, 10*time.Minute),
 		sts.Register(pool, logger, 10*time.Minute, time.Hour),
+		destnorm.Register(pool, logger, 15*time.Minute, 24*time.Hour),
 	)
 	if err != nil {
 		logger.Error("job queue init failed", "err", err)
