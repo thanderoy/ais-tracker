@@ -27,6 +27,7 @@ import (
 	"github.com/thanderoy/ais-tracker/internal/workers/geofence"
 	"github.com/thanderoy/ais-tracker/internal/workers/portcall"
 	"github.com/thanderoy/ais-tracker/internal/workers/queue"
+	"github.com/thanderoy/ais-tracker/internal/workers/sts"
 )
 
 // ingestQueueSize bounds the client->writer channel. When full, the client
@@ -91,6 +92,7 @@ func run() int {
 		backfill.Register(pool, logger, time.Hour),
 		portcall.Register(pool, logger, 5*time.Minute, 6*time.Hour, 15*time.Minute),
 		geofence.Register(pool, logger, time.Minute, 10*time.Minute),
+		sts.Register(pool, logger, 10*time.Minute, time.Hour),
 	)
 	if err != nil {
 		logger.Error("job queue init failed", "err", err)
