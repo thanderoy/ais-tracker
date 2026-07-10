@@ -22,6 +22,8 @@ import (
 	"github.com/thanderoy/ais-tracker/internal/ingest/rate"
 	"github.com/thanderoy/ais-tracker/internal/ingest/writer"
 	applog "github.com/thanderoy/ais-tracker/internal/log"
+	"github.com/thanderoy/ais-tracker/internal/notify"
+	"github.com/thanderoy/ais-tracker/internal/notify/adapters"
 	"github.com/thanderoy/ais-tracker/internal/workers/anomaly"
 	"github.com/thanderoy/ais-tracker/internal/workers/backfill"
 	"github.com/thanderoy/ais-tracker/internal/workers/destnorm"
@@ -44,9 +46,9 @@ var version = "dev"
 
 // Exit codes.
 const (
-	exitOK          = 0 // clean shutdown
-	exitShutdownTO  = 1 // a component ignored cancellation past the grace window
-	exitFatalError  = 2 // config load failure or a component returned an error
+	exitOK         = 0 // clean shutdown
+	exitShutdownTO = 1 // a component ignored cancellation past the grace window
+	exitFatalError = 2 // config load failure or a component returned an error
 )
 
 func main() {
@@ -121,6 +123,16 @@ func run() int {
 		writer.WithEnqueuer(enrich.NewEnqueuer(q)),
 	)
 
+	// NOTIFY listener -> alert router -> adapters. The listener holds a
+	// dedicated connection; the router fans events out to subscribed adapters.
+	listener := notify.New(cfg.DatabaseURL, notify.DefaultChannels, logger)
+	router := notify.NewRouter(pool, logger)
+	router.Register(adapters.NewStdout(logger), notify.Subscription{})
+	if cfg.TelegramBotToken != "" && cfg.TelegramChatID != "" {
+		router.Register(adapters.NewTelegram(cfg.TelegramBotToken, cfg.TelegramChatID), notify.Subscription{})
+		logger.Info("telegram alert adapter enabled")
+	}
+
 	logger.Info("hello, ready")
 
 	// Workers, API server, and NOTIFY listeners register here in later phases.
@@ -130,6 +142,8 @@ func run() int {
 		func(ctx context.Context) error { return counter.RunHousekeeping(ctx, 0, 0) },
 		func(ctx context.Context) error { return deduper.RunHousekeeping(ctx, 0, 0) },
 		func(ctx context.Context) error { return q.Run(ctx) },
+		func(ctx context.Context) error { return listener.Run(ctx) },
+		func(ctx context.Context) error { return router.Run(ctx, listener.Notifications()) },
 	}
 
 	return supervise(ctx, cfg.ShutdownGrace, logger, components...)
