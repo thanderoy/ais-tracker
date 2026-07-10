@@ -15,6 +15,7 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -72,6 +73,95 @@ func StartRawPostgres(ctx context.Context) (dsn string, cleanup func(), err erro
 		return "", nil, fmt.Errorf("connection string: %w", err)
 	}
 	return dsn, cleanup, nil
+}
+
+// StartLogicalPostgres launches a fully-migrated Postgres configured with
+// wal_level=logical, required for logical replication / CDC. The base image
+// starts at wal_level=replica, which needs a restart to change, so we set it via
+// ALTER SYSTEM and restart the container before applying migrations.
+func StartLogicalPostgres(ctx context.Context) (dsn string, cleanup func(), err error) {
+	initScript, err := extensionsScript()
+	if err != nil {
+		return "", nil, err
+	}
+
+	container, err := postgres.Run(ctx, image,
+		postgres.WithDatabase("ais"),
+		postgres.WithUsername("ais"),
+		postgres.WithPassword("ais"),
+		postgres.WithInitScripts(initScript),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(180*time.Second),
+		),
+	)
+	if err != nil {
+		return "", nil, fmt.Errorf("start container: %w", err)
+	}
+	cleanup = func() { _ = container.Terminate(context.Background()) }
+
+	if err := setLogicalAndRestart(ctx, container); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+
+	dsn, err = container.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("connection string: %w", err)
+	}
+	if err := applyMigrations(dsn); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("apply migrations: %w", err)
+	}
+	return dsn, cleanup, nil
+}
+
+// setLogicalAndRestart flips wal_level to logical and restarts the container so
+// it takes effect, then waits for the server to accept connections again (the
+// host port is remapped on restart).
+func setLogicalAndRestart(ctx context.Context, container *postgres.PostgresContainer) error {
+	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		return err
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("connect for ALTER SYSTEM: %w", err)
+	}
+	_, err = conn.Exec(ctx, "ALTER SYSTEM SET wal_level = 'logical'")
+	_ = conn.Close(ctx)
+	if err != nil {
+		return fmt.Errorf("set wal_level: %w", err)
+	}
+
+	timeout := 30 * time.Second
+	if err := container.Stop(ctx, &timeout); err != nil {
+		return fmt.Errorf("stop for restart: %w", err)
+	}
+	if err := container.Start(ctx); err != nil {
+		return fmt.Errorf("restart: %w", err)
+	}
+
+	// Poll until the restarted server accepts connections (fresh DSN/port).
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		newDSN, derr := container.ConnectionString(ctx, "sslmode=disable")
+		if derr == nil {
+			if c, cerr := pgx.Connect(ctx, newDSN); cerr == nil {
+				pingErr := c.Ping(ctx)
+				_ = c.Close(ctx)
+				if pingErr == nil {
+					return nil
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return errors.New("timeout waiting for logical-restart readiness")
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func applyMigrations(dsn string) error {

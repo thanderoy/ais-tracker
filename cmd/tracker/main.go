@@ -21,6 +21,7 @@ import (
 	"github.com/thanderoy/ais-tracker/internal/ingest/dedup"
 	"github.com/thanderoy/ais-tracker/internal/ingest/rate"
 	"github.com/thanderoy/ais-tracker/internal/ingest/writer"
+	"github.com/thanderoy/ais-tracker/internal/cdc"
 	applog "github.com/thanderoy/ais-tracker/internal/log"
 	"github.com/thanderoy/ais-tracker/internal/notify"
 	"github.com/thanderoy/ais-tracker/internal/notify/adapters"
@@ -144,6 +145,15 @@ func run() int {
 		func(ctx context.Context) error { return q.Run(ctx) },
 		func(ctx context.Context) error { return listener.Run(ctx) },
 		func(ctx context.Context) error { return router.Run(ctx, listener.Notifications()) },
+	}
+
+	// CDC self-enables when the database supports logical replication; otherwise
+	// the service runs without the durable event stream rather than failing.
+	cdcConsumer := cdc.New(cfg.DatabaseURL, cdc.SlotName, cdc.DefaultTables, cdc.LogSink{Logger: logger}, logger)
+	if err := cdcConsumer.EnsureSlot(ctx, pool); err != nil {
+		logger.Warn("CDC disabled: could not create replication slot (needs wal_level=logical)", "err", err)
+	} else {
+		components = append(components, func(ctx context.Context) error { return cdcConsumer.Run(ctx) })
 	}
 
 	return supervise(ctx, cfg.ShutdownGrace, logger, components...)
