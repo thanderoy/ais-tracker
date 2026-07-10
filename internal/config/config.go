@@ -12,14 +12,16 @@ import (
 // Config holds all runtime configuration, sourced from the environment
 // twelve-factor style.
 type Config struct {
-	AppEnv          string        // dev | prod
-	DatabaseURL     string        // pgx connection string
-	HTTPPort        int           // API listen port
-	LogLevel        string        // debug | info | warn | error
-	LogFormat       string        // text | json
-	ShutdownGrace   time.Duration // bounded graceful-shutdown window
-	AISStreamAPIKey string        // optional; anonymous connections allowed
-	WorkerPoolSize  int           // River worker concurrency per queue
+	AppEnv           string        // dev | prod
+	DatabaseURL      string        // pgx connection string
+	HTTPPort         int           // API listen port
+	LogLevel         string        // debug | info | warn | error
+	LogFormat        string        // text | json
+	ShutdownGrace    time.Duration // bounded graceful-shutdown window
+	AISStreamAPIKey  string        // optional; anonymous connections allowed
+	WorkerPoolSize   int           // River worker concurrency per queue
+	TelegramBotToken string        // optional; enables the Telegram alert adapter
+	TelegramChatID   string        // optional; target chat for Telegram alerts
 }
 
 // loader accumulates validation errors so Load reports every problem at once
@@ -77,14 +79,16 @@ func Load() (*Config, error) {
 	l := &loader{}
 
 	cfg := &Config{
-		AppEnv:          l.enum("APP_ENV", "dev", "dev", "prod"),
-		DatabaseURL:     l.requireString("DATABASE_URL"),
-		HTTPPort:        l.optionalInt("HTTP_PORT", 8080),
-		LogLevel:        l.enum("LOG_LEVEL", "info", "debug", "info", "warn", "error"),
-		LogFormat:       l.enum("LOG_FORMAT", "text", "text", "json"),
-		ShutdownGrace:   time.Duration(l.optionalInt("SHUTDOWN_GRACE_SECONDS", 30)) * time.Second,
-		AISStreamAPIKey: os.Getenv("AISSTREAM_API_KEY"),
-		WorkerPoolSize:  l.optionalInt("WORKER_POOL_SIZE", 10),
+		AppEnv:           l.enum("APP_ENV", "dev", "dev", "prod"),
+		DatabaseURL:      l.requireString("DATABASE_URL"),
+		HTTPPort:         l.optionalInt("HTTP_PORT", 8080),
+		LogLevel:         l.enum("LOG_LEVEL", "info", "debug", "info", "warn", "error"),
+		LogFormat:        l.enum("LOG_FORMAT", "text", "text", "json"),
+		ShutdownGrace:    time.Duration(l.optionalInt("SHUTDOWN_GRACE_SECONDS", 30)) * time.Second,
+		AISStreamAPIKey:  os.Getenv("AISSTREAM_API_KEY"),
+		WorkerPoolSize:   l.optionalInt("WORKER_POOL_SIZE", 10),
+		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
+		TelegramChatID:   os.Getenv("TELEGRAM_CHAT_ID"),
 	}
 
 	if cfg.DatabaseURL != "" {

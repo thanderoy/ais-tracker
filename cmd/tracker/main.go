@@ -21,10 +21,16 @@ import (
 	"github.com/thanderoy/ais-tracker/internal/ingest/dedup"
 	"github.com/thanderoy/ais-tracker/internal/ingest/rate"
 	"github.com/thanderoy/ais-tracker/internal/ingest/writer"
+	"github.com/thanderoy/ais-tracker/internal/cdc"
 	applog "github.com/thanderoy/ais-tracker/internal/log"
+	"github.com/thanderoy/ais-tracker/internal/notify"
+	"github.com/thanderoy/ais-tracker/internal/notify/adapters"
+	"github.com/thanderoy/ais-tracker/internal/workers/anomaly"
 	"github.com/thanderoy/ais-tracker/internal/workers/backfill"
 	"github.com/thanderoy/ais-tracker/internal/workers/destnorm"
+	"github.com/thanderoy/ais-tracker/internal/workers/embed"
 	"github.com/thanderoy/ais-tracker/internal/workers/enrich"
+	"github.com/thanderoy/ais-tracker/internal/workers/gaps"
 	"github.com/thanderoy/ais-tracker/internal/workers/geofence"
 	"github.com/thanderoy/ais-tracker/internal/workers/portcall"
 	"github.com/thanderoy/ais-tracker/internal/workers/queue"
@@ -41,9 +47,9 @@ var version = "dev"
 
 // Exit codes.
 const (
-	exitOK          = 0 // clean shutdown
-	exitShutdownTO  = 1 // a component ignored cancellation past the grace window
-	exitFatalError  = 2 // config load failure or a component returned an error
+	exitOK         = 0 // clean shutdown
+	exitShutdownTO = 1 // a component ignored cancellation past the grace window
+	exitFatalError = 2 // config load failure or a component returned an error
 )
 
 func main() {
@@ -97,6 +103,9 @@ func run() int {
 		sts.Register(pool, logger, 10*time.Minute, time.Hour),
 		destnorm.Register(pool, logger, 15*time.Minute, 24*time.Hour),
 		sanctions.Register(pool, logger, 24*time.Hour),
+		embed.Register(pool, logger, 24*time.Hour, 7*24*time.Hour, 50),
+		anomaly.Register(pool, logger, 24*time.Hour),
+		gaps.Register(pool, logger, 30*time.Minute, 6*time.Hour, 72*time.Hour),
 	)
 	if err != nil {
 		logger.Error("job queue init failed", "err", err)
@@ -115,6 +124,16 @@ func run() int {
 		writer.WithEnqueuer(enrich.NewEnqueuer(q)),
 	)
 
+	// NOTIFY listener -> alert router -> adapters. The listener holds a
+	// dedicated connection; the router fans events out to subscribed adapters.
+	listener := notify.New(cfg.DatabaseURL, notify.DefaultChannels, logger)
+	router := notify.NewRouter(pool, logger)
+	router.Register(adapters.NewStdout(logger), notify.Subscription{})
+	if cfg.TelegramBotToken != "" && cfg.TelegramChatID != "" {
+		router.Register(adapters.NewTelegram(cfg.TelegramBotToken, cfg.TelegramChatID), notify.Subscription{})
+		logger.Info("telegram alert adapter enabled")
+	}
+
 	logger.Info("hello, ready")
 
 	// Workers, API server, and NOTIFY listeners register here in later phases.
@@ -124,6 +143,17 @@ func run() int {
 		func(ctx context.Context) error { return counter.RunHousekeeping(ctx, 0, 0) },
 		func(ctx context.Context) error { return deduper.RunHousekeeping(ctx, 0, 0) },
 		func(ctx context.Context) error { return q.Run(ctx) },
+		func(ctx context.Context) error { return listener.Run(ctx) },
+		func(ctx context.Context) error { return router.Run(ctx, listener.Notifications()) },
+	}
+
+	// CDC self-enables when the database supports logical replication; otherwise
+	// the service runs without the durable event stream rather than failing.
+	cdcConsumer := cdc.New(cfg.DatabaseURL, cdc.SlotName, cdc.DefaultTables, cdc.LogSink{Logger: logger}, logger)
+	if err := cdcConsumer.EnsureSlot(ctx, pool); err != nil {
+		logger.Warn("CDC disabled: could not create replication slot (needs wal_level=logical)", "err", err)
+	} else {
+		components = append(components, func(ctx context.Context) error { return cdcConsumer.Run(ctx) })
 	}
 
 	return supervise(ctx, cfg.ShutdownGrace, logger, components...)
