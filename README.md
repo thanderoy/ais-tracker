@@ -5,8 +5,9 @@ and analyzes them, and serves the results through an HTTP + WebSocket API with a
 Leaflet map — built on **one Go binary and one Postgres instance**, no other
 infrastructure.
 
-The project is a deliberate tour of eleven Postgres capabilities working
-together in a single system.
+The project is a deliberate tour of a dozen Postgres capabilities working
+together in a single system. Each is explained, with a representative query and
+its scaling limits, in [docs/postgres-capabilities.md](docs/postgres-capabilities.md).
 
 ## Postgres capability coverage
 
@@ -47,14 +48,16 @@ internal/ingest/       source clients + writer
 internal/reference/    port + EEZ reference-data loaders
 internal/enrichment/   operator dedup + sanctions feed
 internal/workers/      queue workers
-internal/api/          HTTP + WebSocket handlers (search, hierarchy, similar)
+internal/api/          HTTP + WebSocket handlers, REST store, dashboard mount
+internal/metrics/      Prometheus registry + collector bridging atomic counters
 internal/notify/       LISTEN/NOTIFY listener + alert dispatch adapters
 internal/cdc/          wal2json logical replication consumer
 internal/config/       env config loader
 internal/log/          slog setup
+web/                   embedded Leaflet dashboard (HTML/CSS/JS via go:embed)
 migrations/            golang-migrate SQL files
-deploy/                docker-compose, Dockerfiles
-docs/                  architecture notes
+deploy/                docker-compose, Dockerfile, Grafana dashboard, backup
+docs/                  architecture, schema, and capability notes
 ```
 
 ## Spatial analytics (PostGIS)
@@ -150,6 +153,58 @@ River owns and versions its own schema (the `river_job` family), so those
 migrations run through River's migrator at startup rather than the
 golang-migrate set under `migrations/`.
 
+## API, live feed, and dashboard
+
+The same binary that ingests and analyzes also serves everything on one port.
+`internal/api` is a [chi](https://github.com/go-chi/chi) router with a JSON
+`{data}` / `{error}` envelope, request IDs, structured request logging, a
+per-request timeout, and CORS.
+
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/api/vessels?search=` | full-text vessel search |
+| GET | `/api/vessels/{mmsi}` | detail: last position, operators, sanctions, anomaly |
+| GET | `/api/vessels/{mmsi}/positions?from=&to=` | track within a time window |
+| GET | `/api/vessels/{mmsi}/similar?method=` | pgvector nearest trajectories |
+| GET | `/api/ports?search=&country=` | port lookup |
+| GET | `/api/ports/{id}/recent-calls` | recent port calls |
+| GET / POST | `/api/geofences` | list / create a watch polygon (GeoJSON) |
+| GET | `/api/geofences/{id}/events` | enter/exit crossings |
+| GET | `/api/alerts?since=&type=` | unified alert feed |
+| GET | `/api/sts-events` · `/api/ais-gaps` | ship-to-ship transfers · dark-vessel gaps |
+| GET | `/ws/positions` | WebSocket live-position feed |
+| GET | `/api/docs` · `/api/openapi.json` | Redoc viewer · OpenAPI 3.0 spec |
+| GET | `/healthz` · `/readyz` · `/metrics` | liveness · readiness · Prometheus |
+
+**Live feed.** The writer's flush path hands each batch of fixes to a WebSocket
+hub (`internal/api/ws.go`). A client sends `{"type":"subscribe","bbox":[...]}`
+with its map viewport; the hub pre-encodes each fix once and delivers only those
+inside the box. Per-subscriber queues are bounded — a slow client's overflow is
+dropped and counted, never allowed to stall the broadcaster.
+
+**Dashboard.** `web/` is a vanilla-JS Leaflet map embedded in the binary with
+`go:embed` and served from the root path, so there is no separate frontend
+service. It opens the WebSocket, plots live vessels, re-subscribes on pan/zoom,
+and drives search, vessel detail, geofence overlays, and the alert feed off the
+REST API.
+
+**Metrics.** `internal/metrics` exposes a Prometheus endpoint. Rather than
+threading a Prometheus dependency through the ingest, queue, and CDC packages, a
+custom collector reads their existing atomic-counter snapshots at scrape time.
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `ais_messages_written_total`, `ais_positions_written_total` | counter | ingest throughput |
+| `ais_messages_duplicate_total`, `ais_writer_flush_errors_total` | counter | dedup + flush health |
+| `ais_notifications_received_total{channel}` | counter | NOTIFY volume per channel |
+| `ais_jobs_completed_total{kind}`, `ais_jobs_failed_total{kind}` | counter | queue worker outcomes |
+| `ais_ws_subscribers` | gauge | live WebSocket clients |
+| `ais_ws_frames_dispatched_total`, `ais_ws_frames_dropped_total` | counter | feed delivery vs. backpressure |
+| `ais_cdc_lag_bytes` | gauge | replication-slot lag (WAL pinned by the consumer) |
+| `ais_http_request_duration_seconds{method,route,status}` | histogram | API latency, keyed on route pattern |
+
+A starter Grafana board lives at `deploy/grafana/dashboard.json`.
+
 ## Running
 
 ```sh
@@ -194,17 +249,29 @@ CDC self-enables when the database runs with `wal_level=logical` (the compose
 stack sets it); otherwise the service logs `CDC disabled` and runs without the
 replication stream.
 
+## Deployment
+
+`deploy/docker-compose.prod.yml` runs the whole thing: Postgres (with
+`wal_level=logical` so CDC self-enables), a one-shot migrator, the tracker, and
+a Postgres metrics exporter, with Traefik labels for TLS and host routing. The
+tracker image (`Dockerfile`) is a multi-stage build onto distroless static —
+about 15 MB, no shell — so the compose healthcheck calls a `tracker healthcheck`
+subcommand rather than `curl`. `deploy/backup.sh` runs a retained `pg_dump` on a
+schedule. See [docs/architecture.md](docs/architecture.md) for the topology.
+
 ## Status
 
-Phases 0–5 complete: foundations, live ingest (JSONB raw store, UNLOGGED
-caches/counters), the positions hypertable with compression/retention and an
-hourly continuous aggregate, the SKIP LOCKED job queue, PostGIS spatial
-analytics (port/EEZ reference data plus port-call, geofence, and STS detection),
+All six phases complete. Foundations; live ingest (JSONB raw store, UNLOGGED
+caches/counters); the positions hypertable with compression/retention and an
+hourly continuous aggregate; the SKIP LOCKED job queue; PostGIS spatial
+analytics (port/EEZ reference data plus port-call, geofence, and STS detection);
 the search/dedup/hierarchy/FDW layer (full-text search, `pg_trgm` operator
 dedup, recursive-CTE hierarchies, destination normalization, OFAC sanctions via
-`file_fdw`), and the vectors/real-time/CDC layer — `pgvector` trajectory
-embeddings with similarity and anomaly scoring, AIS-gap detection, a
-LISTEN/NOTIFY alert pipeline with dispatch adapters, and a wal2json logical
-replication event stream. Only Phase 6 (API + dashboard) remains. See
-`plan/WORKPLAN.md` for the full, phase-by-phase plan (kept locally, outside
-version control).
+`file_fdw`); the vectors/real-time/CDC layer (`pgvector` trajectory embeddings
+with similarity and anomaly scoring, AIS-gap detection, a LISTEN/NOTIFY alert
+pipeline with dispatch adapters, and a wal2json logical replication event
+stream); and the serving layer — the HTTP + WebSocket API, the embedded Leaflet
+dashboard, Prometheus metrics, and the production deployment. Design notes live
+in [docs/](docs/): [architecture](docs/architecture.md),
+[schema](docs/schema.md), and the
+[Postgres-capabilities tour](docs/postgres-capabilities.md).
