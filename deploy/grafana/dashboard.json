@@ -1,0 +1,81 @@
+{
+  "title": "ais-tracker",
+  "uid": "ais-tracker",
+  "schemaVersion": 39,
+  "editable": true,
+  "tags": ["ais-tracker"],
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Ingest rate (msg/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "rate(ais_messages_written_total[1m])", "legendFormat": "written" },
+        { "expr": "rate(ais_positions_written_total[1m])", "legendFormat": "positions" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "HTTP request latency (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(ais_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{route}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Jobs completed / failed",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum(rate(ais_jobs_completed_total[5m]))", "legendFormat": "completed" },
+        { "expr": "sum(rate(ais_jobs_failed_total[5m]))", "legendFormat": "failed" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "CDC replication-slot lag (bytes)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "expr": "ais_cdc_lag_bytes", "legendFormat": "lag" }]
+    },
+    {
+      "id": 5,
+      "title": "WebSocket subscribers",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "expr": "ais_ws_subscribers", "legendFormat": "subscribers" }]
+    },
+    {
+      "id": 6,
+      "title": "Notifications received (by channel)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum by (channel) (rate(ais_notifications_received_total[5m]))", "legendFormat": "{{channel}}" }
+      ]
+    }
+  ]
+}
