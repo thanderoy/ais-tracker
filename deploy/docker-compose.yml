@@ -8,7 +8,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ais}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ais}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (see .env.example)}
       POSTGRES_DB: ${POSTGRES_DB:-ais}
     # Runtime overrides. wal_level=logical + replication slots are required for
     # the Phase 5 CDC work; they must be set at postmaster start, not via SQL.
