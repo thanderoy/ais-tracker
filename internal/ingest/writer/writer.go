@@ -46,6 +46,20 @@ type Enqueuer interface {
 	EnqueueEnrichment(ctx context.Context, mmsi int64) error
 }
 
+// PositionUpdate is a single live fix handed to a Broadcaster after a flush.
+type PositionUpdate struct {
+	MMSI       int64
+	Lon, Lat   float64
+	SOG, COG   *float64
+	ReportedAt time.Time
+}
+
+// Broadcaster receives the batch's non-duplicate position updates after each
+// flush, for pushing to live subscribers (the WebSocket feed). Optional.
+type Broadcaster interface {
+	Broadcast(updates []PositionUpdate)
+}
+
 // Option customizes a Writer at construction.
 type Option func(*Writer)
 
@@ -66,6 +80,12 @@ func WithEnqueuer(e Enqueuer) Option {
 	return func(w *Writer) { w.enqueuer = e }
 }
 
+// WithBroadcaster wires a live-position sink, fed the batch's non-duplicate
+// fixes after each flush.
+func WithBroadcaster(b Broadcaster) Option {
+	return func(w *Writer) { w.broadcaster = b }
+}
+
 // Metrics is a snapshot of writer counters.
 type Metrics struct {
 	Batched     int64 // messages accepted into a batch
@@ -81,9 +101,10 @@ type Writer struct {
 	pool    *pgxpool.Pool
 	cfg     Config
 	logger   *slog.Logger
-	counter  RateCounter
-	deduper  Deduper
-	enqueuer Enqueuer
+	counter     RateCounter
+	deduper     Deduper
+	enqueuer    Enqueuer
+	broadcaster Broadcaster
 
 	batched     atomic.Int64
 	flushes     atomic.Int64
@@ -206,6 +227,7 @@ func (w *Writer) flush(ctx context.Context, batch []aisstream.Message) error {
 	}
 
 	w.enqueueEnrichment(ctx, newMMSIs)
+	w.broadcast(batch, dup)
 	w.flushes.Add(1)
 	w.rowsWritten.Add(int64(len(batch)))
 	w.recordRate(ctx, batch)
@@ -370,6 +392,31 @@ RETURNING mmsi, (xmax = 0) AS inserted`
 		}
 	}
 	return inserted, rows.Err()
+}
+
+// broadcast hands the batch's non-duplicate position fixes to the optional
+// live sink. It runs after the flush's writes so subscribers never see a fix
+// that failed to persist. The sink is expected to be non-blocking.
+func (w *Writer) broadcast(batch []aisstream.Message, dup []bool) {
+	if w.broadcaster == nil {
+		return
+	}
+	updates := make([]PositionUpdate, 0, len(batch))
+	for i, m := range batch {
+		if dup[i] || !m.HasPosition {
+			continue
+		}
+		at := time.Now()
+		if m.HasReported {
+			at = m.ReportedAt
+		}
+		updates = append(updates, PositionUpdate{
+			MMSI: m.MMSI, Lon: m.Lon, Lat: m.Lat, SOG: m.Sog, COG: m.Cog, ReportedAt: at,
+		})
+	}
+	if len(updates) > 0 {
+		w.broadcaster.Broadcast(updates)
+	}
 }
 
 // enqueueEnrichment fires one enrichment job per first-seen MMSI. It is
