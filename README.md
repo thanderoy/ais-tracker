@@ -2,29 +2,48 @@
 
 A maritime intelligence platform that ingests live vessel positions, enriches
 and analyzes them, and serves the results through an HTTP + WebSocket API with a
-Leaflet map — built on **one Go binary and one Postgres instance**, no other
-infrastructure.
+Leaflet map. It runs as **one Go binary against one Postgres instance**, with no
+other infrastructure.
 
-The project is a deliberate tour of a dozen Postgres capabilities working
-together in a single system. Each is explained, with a representative query and
-its scaling limits, in [docs/postgres-capabilities.md](docs/postgres-capabilities.md).
+The design premise is that a single Postgres can cover storage, spatial
+analysis, search, fuzzy matching, graph traversal, federated queries, vector
+similarity, queuing, pub/sub, and change capture at once. ais-tracker exercises
+a dozen of those capabilities in a working system; each is explained, with a
+representative query and its scaling limits, in
+[docs/postgres-capabilities.md](docs/postgres-capabilities.md).
+
+## What it does
+
+- Streams live AIS traffic from AISStream, decodes it, and stores raw payloads,
+  a position history, and a hot last-known-position cache.
+- Runs spatial analytics continuously: port-call detection, user-defined
+  geofence crossings, and ship-to-ship transfer detection.
+- Resolves vessels and their operators — full-text vessel search, fuzzy operator
+  dedup, ownership hierarchies, destination normalization, and OFAC sanctions
+  matching.
+- Detects patterns over time: trajectory-similarity search, per-vessel anomaly
+  scoring, and dark-vessel (AIS gap) detection.
+- Pushes real-time alerts through LISTEN/NOTIFY and streams a durable change feed
+  through logical replication.
+- Serves a REST API, a live WebSocket position feed, an embedded map dashboard,
+  and Prometheus metrics — all on one port.
 
 ## Postgres capability coverage
 
-| Capability | Where | Use |
+| Capability | In code | Used for |
 |---|---|---|
-| JSONB | Phase 1 | Raw AIS message payloads |
-| UNLOGGED tables | Phase 1 | Last-known-position cache, rate limiters |
-| SKIP LOCKED queues | Phase 2 | Enrichment, geofence eval, alert dispatch |
-| Time-series + partitioning (TimescaleDB) | Phase 2 | Position hypertable, compression, continuous aggregates |
-| PostGIS | Phase 3 | Port polygons, EEZs, spatial-temporal joins |
-| Full-text search (`tsvector` + GIN) | Phase 4 | Vessel names, call signs, destinations |
-| `pg_trgm` | Phase 4 | Operator/owner disambiguation |
-| Recursive CTEs | Phase 4 | Shipping company + flag-state hierarchies |
-| Foreign data wrappers | Phase 4 | Sanctions lists queried live |
-| `pgvector` | Phase 5 | Trajectory embeddings, similarity, anomaly scoring |
-| LISTEN/NOTIFY | Phase 5 | Port arrivals, gap detection, emergency squawks |
-| Logical replication (CDC) | Phase 5 | High-signal event stream to external consumers |
+| JSONB | `internal/ingest` | Raw AIS message payloads |
+| UNLOGGED tables | `internal/ingest` | Last-known-position cache, rate limiters |
+| SKIP LOCKED queues | `internal/workers` (River) | Enrichment, geofence eval, alert dispatch |
+| Time-series + partitioning (TimescaleDB) | `migrations`, `positions` | Position hypertable, compression, continuous aggregates |
+| PostGIS | `internal/workers` | Port polygons, EEZs, spatial-temporal joins |
+| Full-text search (`tsvector` + GIN) | `internal/api/search` | Vessel names, call signs, destinations |
+| `pg_trgm` | `internal/enrichment/operators` | Operator/owner disambiguation |
+| Recursive CTEs | `internal/api/hierarchy` | Shipping company + flag-state hierarchies |
+| Foreign data wrappers | `internal/enrichment/sanctions` | Sanctions lists queried live |
+| `pgvector` | `internal/api/similar` | Trajectory embeddings, similarity, anomaly scoring |
+| LISTEN/NOTIFY | `internal/notify` | Port arrivals, gap detection, emergency squawks |
+| Logical replication (CDC) | `internal/cdc` | High-signal event stream to external consumers |
 
 ## Stack
 
@@ -60,6 +79,23 @@ deploy/                docker-compose, Dockerfile, Grafana dashboard, backup
 docs/                  architecture, schema, and capability notes
 ```
 
+## Ingest and storage
+
+The AISStream client holds a WebSocket to the upstream feed and pushes decoded
+messages onto a bounded channel; when the channel fills it drops messages rather
+than stalling the socket, so a slow database never backs pressure onto the
+network read. A batched writer flushes on size or interval, whichever comes
+first. Each flush writes the raw JSONB, appends position reports to the
+TimescaleDB hypertable, upserts the vessel row and the UNLOGGED last-position
+cache, and hands the batch's fixes to the WebSocket hub. The first time an MMSI
+is seen, the writer enqueues an enrichment job.
+
+`positions` is a hypertable partitioned by time, with old chunks compressed into
+a columnstore and an hourly continuous aggregate (`voyage_hourly`) that rolls
+positions into per-vessel tracks. `vessel_last_position` is a separate UNLOGGED
+cache rebuilt from the archive on startup, keeping the hot "where is it now"
+lookups out of the WAL.
+
 ## Spatial analytics (PostGIS)
 
 Every position carries a `geog geography(Point, 4326)` alongside its raw
@@ -91,9 +127,6 @@ GIST-assisted query reconciled idempotently into its table:
   pier-side vessels inside a port polygon.
 
 ## Search, dedup, hierarchies, sanctions
-
-Four more Postgres capabilities cover the "we replaced Elasticsearch, a fuzzy
-matcher, a graph database, and a federated query layer with one Postgres" story:
 
 - **Full-text search** — `vessels.search_doc` is a generated `tsvector`
   (name/call-sign/flag, weighted, `simple` config) with a GIN index.
@@ -139,19 +172,17 @@ Work that doesn't belong on the hot ingest path — vessel enrichment, gap
 backfill, port-call detection, geofence evaluation, ship-to-ship transfer
 detection, destination normalization, sanctions matching, trajectory
 embedding, anomaly scoring, and AIS-gap detection — runs on a Postgres-backed
-job queue via [River](https://riverqueue.com/). River is built
-on `SELECT ... FOR UPDATE SKIP LOCKED`: many workers concurrently claim rows
-from the jobs table, and `SKIP LOCKED` makes each worker step over rows another
-worker has already locked instead of blocking on them. The result is that N
-workers drain a queue with no double-processing and no lock contention, which is
-exactly what a queue needs — and it's all just Postgres, no broker.
+job queue via [River](https://riverqueue.com/). River is built on `SELECT ...
+FOR UPDATE SKIP LOCKED`: many workers concurrently claim rows from the jobs
+table, and `SKIP LOCKED` makes each worker step over rows another worker has
+already locked instead of blocking on them. N workers drain the queue with no
+double-processing and no lock contention, using nothing but Postgres.
 
 `internal/workers/queue/naive/` contains a ~60-line hand-rolled version of the
 same primitive, kept as a readable reference for what River does under the hood.
-
 River owns and versions its own schema (the `river_job` family), so those
-migrations run through River's migrator at startup rather than the
-golang-migrate set under `migrations/`.
+migrations run through River's migrator at startup rather than the golang-migrate
+set under `migrations/`.
 
 ## API, live feed, and dashboard
 
@@ -179,8 +210,8 @@ per-request timeout, and CORS.
 **Live feed.** The writer's flush path hands each batch of fixes to a WebSocket
 hub (`internal/api/ws.go`). A client sends `{"type":"subscribe","bbox":[...]}`
 with its map viewport; the hub pre-encodes each fix once and delivers only those
-inside the box. Per-subscriber queues are bounded — a slow client's overflow is
-dropped and counted, never allowed to stall the broadcaster.
+inside the box. Per-subscriber queues are bounded, so a slow client's overflow is
+dropped and counted rather than stalling the broadcaster.
 
 **Dashboard.** `web/` is a vanilla-JS Leaflet map embedded in the binary with
 `go:embed` and served from the root path, so there is no separate frontend
@@ -218,6 +249,8 @@ make migrate-up     # apply migrations
 make compose-down   # stop the stack
 ```
 
+Then open http://localhost:8080 for the dashboard.
+
 Load the spatial reference data (after `make migrate-up`):
 
 ```sh
@@ -234,7 +267,8 @@ go run ./cmd/download-sanctions   # daily, via cron/systemd-timer
 
 ### Configuration
 
-Configuration is read from the environment (see `internal/config`). Key vars:
+Configuration is read from the environment (see `internal/config`); copy
+`.env.example` to `.env` to get started. Key vars:
 
 | Var | Default | Meaning |
 |---|---|---|
@@ -259,22 +293,15 @@ self-enables), a one-shot migrator, the tracker, and a Postgres metrics exporter
 with Traefik labels for TLS and host routing. The tracker image (`Dockerfile`) is
 a multi-stage build onto distroless static — about 15 MB, no shell — so the
 compose healthcheck calls a `tracker healthcheck` subcommand rather than `curl`.
-`deploy/backup.sh` runs a retained `pg_dump` on a schedule. See
-[docs/architecture.md](docs/architecture.md) for the topology.
+`deploy/backup.sh` runs a retained `pg_dump` on a schedule.
 
-## Status
+## Documentation
 
-All six phases complete. Foundations; live ingest (JSONB raw store, UNLOGGED
-caches/counters); the positions hypertable with compression/retention and an
-hourly continuous aggregate; the SKIP LOCKED job queue; PostGIS spatial
-analytics (port/EEZ reference data plus port-call, geofence, and STS detection);
-the search/dedup/hierarchy/FDW layer (full-text search, `pg_trgm` operator
-dedup, recursive-CTE hierarchies, destination normalization, OFAC sanctions via
-`file_fdw`); the vectors/real-time/CDC layer (`pgvector` trajectory embeddings
-with similarity and anomaly scoring, AIS-gap detection, a LISTEN/NOTIFY alert
-pipeline with dispatch adapters, and a wal2json logical replication event
-stream); and the serving layer — the HTTP + WebSocket API, the embedded Leaflet
-dashboard, Prometheus metrics, and the production deployment. Design notes live
-in [docs/](docs/): [architecture](docs/architecture.md),
-[schema](docs/schema.md), and the
-[Postgres-capabilities tour](docs/postgres-capabilities.md).
+- [docs/architecture.md](docs/architecture.md) — system and deployment topology,
+  data flow, concurrency model
+- [docs/schema.md](docs/schema.md) — entity relationships and the non-obvious
+  schema choices
+- [docs/postgres-capabilities.md](docs/postgres-capabilities.md) — the twelve
+  Postgres capabilities, each with a representative query and its limits
+- [docs/embeddings.md](docs/embeddings.md) — trajectory embedding methods
+- [docs/replication.md](docs/replication.md) — CDC replication-slot runbook
