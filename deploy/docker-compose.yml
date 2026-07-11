@@ -1,5 +1,18 @@
 name: ais-tracker
 
+# One compose file for both local development and production, split by profile.
+#
+#   Dev  — Postgres only, published on localhost for a host-run tracker binary:
+#            docker compose up -d              (or: make compose-up)
+#
+#   Prod — full stack (one-shot migrator, tracker, postgres-exporter) behind an
+#          external Traefik instance:
+#            docker compose --profile prod up -d
+#
+# Both read a .env supplying POSTGRES_PASSWORD (required; see .env.example). Prod
+# additionally expects TRACKER_HOST and a pre-created external `web` network that
+# Traefik is attached to.
+
 services:
   postgres:
     build:
@@ -10,8 +23,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-ais}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (see .env.example)}
       POSTGRES_DB: ${POSTGRES_DB:-ais}
-    # Runtime overrides. wal_level=logical + replication slots are required for
-    # the Phase 5 CDC work; they must be set at postmaster start, not via SQL.
+    # wal_level=logical + replication slots are required for the Phase 5 CDC
+    # work; they must be set at postmaster start, not via SQL.
     command:
       - postgres
       - -c
@@ -22,15 +35,94 @@ services:
       - max_replication_slots=4
       - -c
       - max_wal_senders=4
+    # Published on localhost only: dev connects from the host, while in prod the
+    # other services reach Postgres over the internal network by service name.
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/home/postgres/pgdata
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ais} -d ${POSTGRES_DB:-ais}"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 10
+    networks:
+      - internal
+
+  # One-shot migrator: applies pending migrations, then exits 0. The tracker
+  # waits for it to complete before starting.
+  migrate:
+    profiles: [prod]
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ais-tracker/tracker:latest
+    restart: "no"
+    entrypoint: ["/usr/local/bin/migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-ais}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ais}?sslmode=disable
+      MIGRATIONS_DIR: /migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+
+  tracker:
+    profiles: [prod]
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ais-tracker/tracker:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-ais}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ais}?sslmode=disable
+      APP_ENV: prod
+      HTTP_PORT: "8080"
+      LOG_FORMAT: json
+      AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/tracker", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.tracker.rule=Host(`${TRACKER_HOST:-ais.example.com}`)"
+      - "traefik.http.routers.tracker.entrypoints=websecure"
+      - "traefik.http.routers.tracker.tls.certresolver=letsencrypt"
+      - "traefik.http.services.tracker.loadbalancer.server.port=8080"
+    networks:
+      - internal
+      - web
+
+  # Postgres metrics for Prometheus, complementing the tracker's own /metrics.
+  postgres-exporter:
+    profiles: [prod]
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: postgres://${POSTGRES_USER:-ais}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ais}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
 
 volumes:
   pgdata:
+
+networks:
+  internal:
+  # `web` is the shared, externally-created Traefik network (prod profile only).
+  web:
+    external: true

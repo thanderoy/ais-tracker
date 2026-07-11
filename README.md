@@ -251,13 +251,16 @@ replication stream.
 
 ## Deployment
 
-`deploy/docker-compose.prod.yml` runs the whole thing: Postgres (with
-`wal_level=logical` so CDC self-enables), a one-shot migrator, the tracker, and
-a Postgres metrics exporter, with Traefik labels for TLS and host routing. The
-tracker image (`Dockerfile`) is a multi-stage build onto distroless static —
-about 15 MB, no shell — so the compose healthcheck calls a `tracker healthcheck`
-subcommand rather than `curl`. `deploy/backup.sh` runs a retained `pg_dump` on a
-schedule. See [docs/architecture.md](docs/architecture.md) for the topology.
+One `deploy/docker-compose.yml` serves both dev and prod, split by profile. The
+default (no profile) is Postgres alone, published on localhost for a host-run
+binary — that's what `make compose-up` starts. `docker compose --profile prod up
+-d` brings up the whole thing: Postgres (with `wal_level=logical` so CDC
+self-enables), a one-shot migrator, the tracker, and a Postgres metrics exporter,
+with Traefik labels for TLS and host routing. The tracker image (`Dockerfile`) is
+a multi-stage build onto distroless static — about 15 MB, no shell — so the
+compose healthcheck calls a `tracker healthcheck` subcommand rather than `curl`.
+`deploy/backup.sh` runs a retained `pg_dump` on a schedule. See
+[docs/architecture.md](docs/architecture.md) for the topology.
 
 ## Status
 

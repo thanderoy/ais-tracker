@@ -111,8 +111,9 @@ flowchart LR
     Backup[backup.sh cron] --> Postgres
 ```
 
-The production stack (`deploy/docker-compose.prod.yml`) is Postgres, a one-shot
-migrator, the tracker, and a Postgres metrics exporter. Traefik terminates TLS
+The production stack is the `prod` profile of `deploy/docker-compose.yml`
+(`docker compose --profile prod up -d`): Postgres, a one-shot migrator, the
+tracker, and a Postgres metrics exporter. Traefik terminates TLS
 and routes by host to the tracker's single port. The tracker image is a
 distroless static build of about 15 MB; the dashboard ships inside it, so there
 is no separate frontend service and no CDN to manage beyond the map tiles the

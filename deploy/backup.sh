@@ -8,13 +8,13 @@
 #
 # Usage: deploy/backup.sh [retention_days]
 #   BACKUP_DIR   destination directory (default ./backups)
-#   COMPOSE_FILE compose file to target (default deploy/docker-compose.prod.yml)
+#   COMPOSE_FILE compose file to target (default deploy/docker-compose.yml)
 #   PG_SERVICE   compose service name (default postgres)
 #   POSTGRES_USER / POSTGRES_DB  credentials (default ais / ais)
 set -euo pipefail
 
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
-COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker-compose.prod.yml}"
+COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker-compose.yml}"
 PG_SERVICE="${PG_SERVICE:-postgres}"
 PGUSER="${POSTGRES_USER:-ais}"
 PGDB="${POSTGRES_DB:-ais}"
