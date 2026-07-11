@@ -17,8 +17,6 @@ const vesselLayer = L.layerGroup().addTo(map);
 
 const statusEl = document.getElementById("status");
 
-// ---- helpers ---------------------------------------------------------------
-
 async function api(path) {
   const res = await fetch(path);
   if (!res.ok) throw new Error(`${path}: ${res.status}`);
@@ -47,8 +45,6 @@ function vesselIcon(cog) {
     iconAnchor: [5, 6],
   });
 }
-
-// ---- live position feed ----------------------------------------------------
 
 let socket;
 
@@ -103,8 +99,6 @@ function updateVessel(p) {
   }
 }
 
-// ---- search ----------------------------------------------------------------
-
 const searchForm = document.getElementById("search-form");
 const searchInput = document.getElementById("search-input");
 const searchResults = document.getElementById("search-results");
@@ -134,8 +128,6 @@ async function runSearch(q) {
   }
   searchResults.classList.remove("hidden");
 }
-
-// ---- vessel sidebar --------------------------------------------------------
 
 const sidebar = document.getElementById("sidebar");
 const sidebarBody = document.getElementById("sidebar-body");
@@ -226,8 +218,6 @@ function fmtNum(n) { return n == null ? "—" : n.toFixed(1); }
 function addKV(dl, k, v) { dl.appendChild(el("dt", null, k)); dl.appendChild(el("dd", null, String(v))); }
 function addSection(parent, title) { parent.appendChild(el("div", "section-title", title)); }
 
-// ---- overlays --------------------------------------------------------------
-
 const portLayer = L.layerGroup();
 const geofenceLayer = L.layerGroup();
 
@@ -262,8 +252,6 @@ document.getElementById("toggle-geofences").addEventListener("change", async (e)
   }
 });
 
-// ---- alerts pane -----------------------------------------------------------
-
 const alertsList = document.getElementById("alerts-list");
 
 async function refreshAlerts() {
@@ -288,8 +276,6 @@ async function refreshAlerts() {
     }
   } catch (_) { /* keep last render on transient failure */ }
 }
-
-// ---- boot ------------------------------------------------------------------
 
 connect();
 refreshAlerts();

@@ -51,7 +51,7 @@ var version = "dev"
 
 // Exit codes.
 const (
-	exitOK         = 0 // clean shutdown
+	exitOK         = 0
 	exitShutdownTO = 1 // a component ignored cancellation past the grace window
 	exitFatalError = 2 // config load failure or a component returned an error
 )
