@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>ais-tracker</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+  <header>
+    <h1>ais&#8203;-tracker</h1>
+    <form id="search-form" autocomplete="off">
+      <input id="search-input" type="search" placeholder="Search vessels by name, call sign, flag&#8230;"/>
+    </form>
+    <div class="overlays">
+      <label><input type="checkbox" id="toggle-ports"/> Ports</label>
+      <label><input type="checkbox" id="toggle-geofences"/> Geofences</label>
+    </div>
+    <span id="status" class="status">connecting&#8230;</span>
+  </header>
+
+  <main>
+    <div id="map"></div>
+
+    <aside id="sidebar" class="hidden">
+      <button id="sidebar-close" aria-label="Close">&times;</button>
+      <div id="sidebar-body"></div>
+    </aside>
+  </main>
+
+  <section id="alerts">
+    <h2>Recent alerts</h2>
+    <ul id="alerts-list"><li class="muted">No alerts yet.</li></ul>
+  </section>
+
+  <ul id="search-results" class="hidden"></ul>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
