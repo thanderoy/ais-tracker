@@ -1,0 +1,115 @@
+name: ais-tracker
+
+# Production stack: Postgres, a one-shot migrator, the tracker binary, and a
+# Postgres metrics exporter. Routing is via Traefik labels; the tracker serves
+# the API, the WebSocket feed, the dashboard, and /metrics on one port.
+#
+#   docker compose -f deploy/docker-compose.prod.yml up -d
+#
+# Expects an external Traefik instance attached to the `web` network and a
+# .env file supplying POSTGRES_PASSWORD and TRACKER_HOST.
+
+services:
+  postgres:
+    build:
+      context: ./postgres
+    image: ais-tracker/postgres:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ais}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-ais}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=timescaledb
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=4
+      - -c
+      - max_wal_senders=4
+    volumes:
+      - pgdata:/home/postgres/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ais} -d ${POSTGRES_DB:-ais}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+  # One-shot migrator: applies pending migrations, then exits 0. The tracker
+  # waits for it to complete before starting.
+  migrate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ais-tracker/tracker:latest
+    restart: "no"
+    entrypoint: ["/usr/local/bin/migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-ais}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ais}?sslmode=disable
+      MIGRATIONS_DIR: /migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+
+  tracker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ais-tracker/tracker:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-ais}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ais}?sslmode=disable
+      APP_ENV: prod
+      HTTP_PORT: "8080"
+      LOG_FORMAT: json
+      AISSTREAM_API_KEY: ${AISSTREAM_API_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/tracker", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.tracker.rule=Host(`${TRACKER_HOST:-ais.example.com}`)"
+      - "traefik.http.routers.tracker.entrypoints=websecure"
+      - "traefik.http.routers.tracker.tls.certresolver=letsencrypt"
+      - "traefik.http.services.tracker.loadbalancer.server.port=8080"
+    networks:
+      - internal
+      - web
+
+  # Postgres metrics for Prometheus, complementing the tracker's own /metrics.
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: postgres://${POSTGRES_USER:-ais}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ais}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+
+volumes:
+  pgdata:
+
+networks:
+  internal:
+  # `web` is the shared, externally-created Traefik network.
+  web:
+    external: true
