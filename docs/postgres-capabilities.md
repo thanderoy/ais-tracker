@@ -57,7 +57,7 @@ Background work runs on [River](https://riverqueue.com/), a queue built on
 once; `SKIP LOCKED` makes each one step over rows a sibling already locked
 instead of blocking on them. The result is N workers draining a queue with no
 double-processing and no lock contention, using nothing but Postgres.
-`internal/workers/queue/naive` keeps a sixty-line version of the primitive as a
+`api/internal/workers/queue/naive` keeps a sixty-line version of the primitive as a
 readable reference.
 
 ```sql

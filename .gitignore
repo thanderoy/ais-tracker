@@ -23,3 +23,7 @@ vendor/
 *.swp
 *~
 .DS_Store
+
+# Terminal UI build output (embedded by api/internal/webui); the placeholder keeps go:embed valid.
+/api/internal/webui/dist/*
+!/api/internal/webui/dist/.gitkeep

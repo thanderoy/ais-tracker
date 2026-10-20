@@ -5,13 +5,35 @@ name: ais-tracker
 #   Dev  — Postgres only, published on localhost for a host-run tracker binary:
 #            docker compose up -d              (or: make compose-up)
 #
-#   Prod — full stack (one-shot migrator, tracker, postgres-exporter) behind an
-#          external Traefik instance:
-#            docker compose --profile prod up -d
+#   Prod — full stack (one-shot migrator, tracker, postgres-exporter) on ganymede,
+#          behind the shared Traefik of the infrastructure repo:
+#            deploy/deploy.sh                  (wraps --profile prod)
 #
-# Both read a .env supplying POSTGRES_PASSWORD (required; see .env.example). Prod
-# additionally expects TRACKER_HOST and a pre-created external `web` network that
-# Traefik is attached to.
+# Both read the repo-root .env supplying POSTGRES_PASSWORD (required; see
+# .env.example). Prod joins two external networks the infrastructure stacks
+# create once per host: `traefik-public` (HTTPS ingress) and `monitoring`
+# (Alloy's scrape fabric). Ingress and observability are opted into purely
+# through labels, following services/traefik/README.md and
+# services/monitoring/README.md there.
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+    tag: "{{.Name}}"
+
+# Alloy tails every container carrying `logging: promtail`; `stackname` fills
+# the Stack filter on the Log Search and Container Metrics dashboards.
+x-common-labels: &default-labels
+  logging: "promtail"
+  stackname: "ais-tracker"
+
+x-tracker-build: &tracker-build
+  context: ..
+  dockerfile: Dockerfile
+  args:
+    VERSION: ${VERSION:-dev}
 
 services:
   postgres:
@@ -41,11 +63,17 @@ services:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/home/postgres/pgdata
+    # ganymede is a shared 8 GB host with no swap; cap the stack so an ingest
+    # spike can't push the other stacks into the OOM killer.
+    mem_limit: ${POSTGRES_MEM_LIMIT:-1536m}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ais} -d ${POSTGRES_DB:-ais}"]
       interval: 10s
       timeout: 5s
       retries: 10
+    labels:
+      <<: *default-labels
+    logging: *default-logging
     networks:
       - internal
 
@@ -53,9 +81,7 @@ services:
   # waits for it to complete before starting.
   migrate:
     profiles: [prod]
-    build:
-      context: ..
-      dockerfile: Dockerfile
+    build: *tracker-build
     image: ais-tracker/tracker:latest
     restart: "no"
     entrypoint: ["/usr/local/bin/migrate", "up"]
@@ -65,14 +91,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    labels:
+      <<: *default-labels
+    logging: *default-logging
     networks:
       - internal
 
   tracker:
     profiles: [prod]
-    build:
-      context: ..
-      dockerfile: Dockerfile
+    build: *tracker-build
     image: ais-tracker/tracker:latest
     restart: unless-stopped
     environment:
@@ -88,6 +115,7 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    mem_limit: ${TRACKER_MEM_LIMIT:-512m}
     healthcheck:
       test: ["CMD", "/usr/local/bin/tracker", "healthcheck"]
       interval: 15s
@@ -95,15 +123,29 @@ services:
       retries: 5
       start_period: 20s
     labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=web"
-      - "traefik.http.routers.tracker.rule=Host(`${TRACKER_HOST:-ais.example.com}`)"
-      - "traefik.http.routers.tracker.entrypoints=websecure"
-      - "traefik.http.routers.tracker.tls.certresolver=letsencrypt"
-      - "traefik.http.services.tracker.loadbalancer.server.port=8080"
+      <<: *default-labels
+
+      # --- Traefik ingress: HTTPS on ais.roythan.de, Let's Encrypt via `le` ---
+      # Router and service names are global across every stack on the shared
+      # Traefik, hence the ais- prefix. /metrics stays off the public router;
+      # Alloy scrapes it over the monitoring network instead.
+      traefik.enable: "true"
+      traefik.docker.network: "traefik-public"
+      traefik.http.routers.ais-tracker.entrypoints: "https"
+      traefik.http.routers.ais-tracker.rule: "Host(`${TRACKER_HOST:-ais.roythan.de}`) && !PathPrefix(`/metrics`)"
+      traefik.http.routers.ais-tracker.tls: "true"
+      traefik.http.routers.ais-tracker.tls.certresolver: "le"
+      traefik.http.services.ais-tracker.loadbalancer.server.port: "8080"
+
+      # --- Metrics: discovered by Alloy's Docker SD on the monitoring network ---
+      prometheus.scrape: "true"
+      prometheus.port: "8080"
+      prometheus.job: "ais-tracker"
+    logging: *default-logging
     networks:
       - internal
-      - web
+      - traefik-public
+      - monitoring
 
   # Postgres metrics for Prometheus, complementing the tracker's own /metrics.
   postgres-exporter:
@@ -115,14 +157,25 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    labels:
+      <<: *default-labels
+      prometheus.scrape: "true"
+      prometheus.port: "9187"
+      prometheus.job: "ais-tracker-postgres"
+    logging: *default-logging
     networks:
       - internal
+      - monitoring
 
 volumes:
   pgdata:
 
 networks:
   internal:
-  # `web` is the shared, externally-created Traefik network (prod profile only).
-  web:
+  # Shared networks owned by the infrastructure repo (prod profile only):
+  #   docker network create traefik-public
+  #   docker network create monitoring
+  traefik-public:
+    external: true
+  monitoring:
     external: true

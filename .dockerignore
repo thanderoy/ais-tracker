@@ -1,0 +1,9 @@
+.git
+.env
+bin/
+plan/
+web/node_modules/
+web/server/
+web/tmp/
+api/internal/webui/dist/*
+!api/internal/webui/dist/.gitkeep

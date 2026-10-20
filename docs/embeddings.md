@@ -2,8 +2,8 @@
 
 Vessel movement is embedded as a fixed 64-dimensional vector so that vessels
 with similar behavior land near each other under cosine distance. This powers
-"find vessels moving like this one" (`internal/api/similar`) and per-vessel
-anomaly scoring (`internal/workers/anomaly`), all through pgvector with an HNSW
+"find vessels moving like this one" (`api/internal/api/similar`) and per-vessel
+anomaly scoring (`api/internal/workers/anomaly`), all through pgvector with an HNSW
 index on `vessel_embeddings.embedding`.
 
 The dimension is **fixed at 64 regardless of method**, so methods share one
@@ -43,7 +43,7 @@ time and memory against recall.
 
 ## How it's used
 
-- **Similarity** (`internal/api/similar`): `1 - (a <=> b)` cosine similarity
+- **Similarity** (`api/internal/api/similar`): `1 - (a <=> b)` cosine similarity
   against the latest embedding per vessel, ordered by `<=>`.
 - **Anomaly** (`selfhist_v1`): the mean cosine distance from a vessel's latest
   embedding to its own prior windows. A vessel repeating its usual route scores

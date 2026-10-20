@@ -1,6 +1,6 @@
 # Schema
 
-The full schema lives in `migrations/` as ordered golang-migrate files
+The full schema lives in `api/migrations/` as ordered golang-migrate files
 (`000001`–`000024`). River owns and versions its own `river_job` tables through
 its migrator, so those are not in this set. This page is the map and the
 commentary on the non-obvious choices; the migrations are the source of truth.
@@ -109,5 +109,5 @@ two-argument `to_tsvector` form is IMMUTABLE, which a generated column requires.
 Every migration has an `up` and a `down`; the test suite applies all of them up
 and then all the way back down against a real Postgres, so the `down` path is not
 allowed to rot. Reference data (ports, EEZs, the OFAC feed) is loaded by
-idempotent one-shot commands under `cmd/`, not by migrations, so the schema and
+idempotent one-shot commands under `api/cmd/`, not by migrations, so the schema and
 the data it holds version independently.
