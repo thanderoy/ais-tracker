@@ -118,10 +118,10 @@ tracker, and a Postgres metrics exporter. Traefik terminates TLS
 and routes by host to the tracker's single port. The tracker image is a
 distroless static build of about 15 MB; the dashboard ships inside it, so there
 is no separate frontend service and no CDN to manage beyond the map tiles the
-browser loads. It runs on `ganymede` at `ais.roythan.de`, where Traefik and the
-monitoring stack come from the infrastructure repo: Alloy discovers the tracker
-and the exporter by their `prometheus.scrape` labels, scrapes `/metrics` over the
-shared `monitoring` network and remote-writes to Prometheus. `deploy/deploy.sh`
+browser loads. It runs on a single Docker host whose Traefik and monitoring
+stack are shared with other services: Alloy discovers the tracker and the
+exporter by their `prometheus.scrape` labels, scrapes `/metrics` over the shared
+`monitoring` network and remote-writes to Prometheus. `deploy/deploy.sh`
 ships a release and `backup.sh` runs `pg_dump` on a schedule. See
 [postgres-capabilities.md](postgres-capabilities.md) for what each Postgres
 feature does and [replication.md](replication.md) for the CDC slot runbook.
