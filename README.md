@@ -27,6 +27,23 @@ representative query and its scaling limits, in
   through logical replication.
 - Serves a REST API, a live WebSocket position feed, an embedded operator
   terminal, and Prometheus metrics — all on one port.
+- Abuses Postgres, making one instance do the work of a stack of services:
+  - **JSONB** for raw AIS message payloads
+  - **UNLOGGED tables** for the last-known-position cache and rate limiters
+  - **SKIP LOCKED queues** (River) for enrichment, geofence evaluation, and alert
+    dispatch
+  - **TimescaleDB** for the position hypertable, compression, and continuous
+    aggregates
+  - **PostGIS** for port polygons, EEZs, and spatial-temporal joins
+  - **Full-text search** (`tsvector` + GIN) for vessel names, call signs, and
+    destinations
+  - **`pg_trgm`** for operator and owner disambiguation
+  - **Recursive CTEs** for shipping-company and flag-state hierarchies
+  - **Foreign data wrappers** to query sanctions lists live
+  - **`pgvector`** for trajectory embeddings, similarity, and anomaly scoring
+  - **LISTEN/NOTIFY** for port arrivals, gap detection, and emergency squawks
+  - **Logical replication** (CDC) to stream high-signal events to external
+    consumers
 
 ## Postgres capability coverage
 
