@@ -8,7 +8,7 @@ is sequenced and replays from where the consumer left off, so downstream sinks
 
 ## What's published
 
-The consumer (`internal/cdc`) filters the stream (via wal2json's `add-tables`)
+The consumer (`api/internal/cdc`) filters the stream (via wal2json's `add-tables`)
 to the high-signal tables:
 
 - `geofence_events`

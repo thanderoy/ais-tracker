@@ -32,18 +32,18 @@ representative query and its scaling limits, in
 
 | Capability | In code | Used for |
 |---|---|---|
-| JSONB | `internal/ingest` | Raw AIS message payloads |
-| UNLOGGED tables | `internal/ingest` | Last-known-position cache, rate limiters |
-| SKIP LOCKED queues | `internal/workers` (River) | Enrichment, geofence eval, alert dispatch |
+| JSONB | `api/internal/ingest` | Raw AIS message payloads |
+| UNLOGGED tables | `api/internal/ingest` | Last-known-position cache, rate limiters |
+| SKIP LOCKED queues | `api/internal/workers` (River) | Enrichment, geofence eval, alert dispatch |
 | Time-series + partitioning (TimescaleDB) | `migrations`, `positions` | Position hypertable, compression, continuous aggregates |
-| PostGIS | `internal/workers` | Port polygons, EEZs, spatial-temporal joins |
-| Full-text search (`tsvector` + GIN) | `internal/api/search` | Vessel names, call signs, destinations |
-| `pg_trgm` | `internal/enrichment/operators` | Operator/owner disambiguation |
-| Recursive CTEs | `internal/api/hierarchy` | Shipping company + flag-state hierarchies |
-| Foreign data wrappers | `internal/enrichment/sanctions` | Sanctions lists queried live |
-| `pgvector` | `internal/api/similar` | Trajectory embeddings, similarity, anomaly scoring |
-| LISTEN/NOTIFY | `internal/notify` | Port arrivals, gap detection, emergency squawks |
-| Logical replication (CDC) | `internal/cdc` | High-signal event stream to external consumers |
+| PostGIS | `api/internal/workers` | Port polygons, EEZs, spatial-temporal joins |
+| Full-text search (`tsvector` + GIN) | `api/internal/api/search` | Vessel names, call signs, destinations |
+| `pg_trgm` | `api/internal/enrichment/operators` | Operator/owner disambiguation |
+| Recursive CTEs | `api/internal/api/hierarchy` | Shipping company + flag-state hierarchies |
+| Foreign data wrappers | `api/internal/enrichment/sanctions` | Sanctions lists queried live |
+| `pgvector` | `api/internal/api/similar` | Trajectory embeddings, similarity, anomaly scoring |
+| LISTEN/NOTIFY | `api/internal/notify` | Port arrivals, gap detection, emergency squawks |
+| Logical replication (CDC) | `api/internal/cdc` | High-signal event stream to external consumers |
 
 ## Stack
 
@@ -51,32 +51,33 @@ representative query and its scaling limits, in
 - **Database:** Postgres 16 with PostGIS, TimescaleDB, pgvector, `pg_trgm`,
   `postgres_fdw`, `wal2json`
 - **Runtime:** Docker Compose locally, a single static Go binary in prod
-- **Frontend:** [Qwik](https://qwik.dev) + Leaflet in `ui/`, pre-rendered to static
+- **Frontend:** [Qwik](https://qwik.dev) + Leaflet in `web/`, pre-rendered to static
   files and served from the Go binary via `embed.FS` (Node 20+ to build)
 
 ## Layout
 
 ```
-cmd/tracker/           main long-running service
-cmd/migrate/           migration runner
-cmd/seed-ports/        World Port Index loader
-cmd/seed-eez/          Marine Regions EEZ loader
-cmd/download-sanctions/ OFAC SDN download + refresh
-internal/ais/          AIS decoders + models
-internal/db/           pgx pool, sqlc-generated code
-internal/ingest/       source clients + writer
-internal/reference/    port + EEZ reference-data loaders
-internal/enrichment/   operator dedup + sanctions feed
-internal/workers/      queue workers
-internal/api/          HTTP + WebSocket handlers, REST store, terminal mount
-internal/metrics/      Prometheus registry + collector bridging atomic counters
-internal/notify/       LISTEN/NOTIFY listener + alert dispatch adapters
-internal/cdc/          wal2json logical replication consumer
-internal/config/       env config loader
-internal/log/          slog setup
-ui/                    Qwik operator terminal (source)
-web/                   go:embed of the built terminal (ui/ builds into web/dist)
-migrations/            golang-migrate SQL files
+api/                   Go service (module github.com/thanderoy/ais-tracker/api)
+  cmd/tracker/           main long-running service
+  cmd/migrate/           migration runner
+  cmd/seed-ports/        World Port Index loader
+  cmd/seed-eez/          Marine Regions EEZ loader
+  cmd/download-sanctions/ OFAC SDN download + refresh
+  internal/ais/          AIS decoders + models
+  internal/db/           pgx pool, sqlc-generated code
+  internal/ingest/       source clients + writer
+  internal/reference/    port + EEZ reference-data loaders
+  internal/enrichment/   operator dedup + sanctions feed
+  internal/workers/      queue workers
+  internal/api/          HTTP + WebSocket handlers, REST store, terminal mount
+  internal/metrics/      Prometheus registry + collector bridging atomic counters
+  internal/notify/       LISTEN/NOTIFY listener + alert dispatch adapters
+  internal/cdc/          wal2json logical replication consumer
+  internal/config/       env config loader
+  internal/log/          slog setup
+  internal/webui/        go:embed of the built terminal (web/ builds into dist/ here)
+  migrations/            golang-migrate SQL files
+web/                   Qwik operator terminal (source)
 deploy/                docker-compose, Dockerfile, Grafana dashboard, backup
 docs/                  architecture, schema, and capability notes
 ```
@@ -132,13 +133,13 @@ GIST-assisted query reconciled idempotently into its table:
 
 - **Full-text search** — `vessels.search_doc` is a generated `tsvector`
   (name/call-sign/flag, weighted, `simple` config) with a GIN index.
-  `internal/api/search` turns user input into a sanitised prefix `tsquery` and
+  `api/internal/api/search` turns user input into a sanitised prefix `tsquery` and
   ranks with `ts_rank_cd`.
-- **Fuzzy operator dedup** (`pg_trgm`) — `internal/enrichment/operators` folds
+- **Fuzzy operator dedup** (`pg_trgm`) — `api/internal/enrichment/operators` folds
   free-text operator names ("MSC", "Mediterranean Shipping Co") to one canonical
   row: exact alias match, then trigram similarity above 0.5, else a new operator
   with grey-zone candidates queued for human review.
-- **Ownership hierarchies** (recursive CTEs) — `internal/api/hierarchy` walks the
+- **Ownership hierarchies** (recursive CTEs) — `api/internal/api/hierarchy` walks the
   `operators.parent_id` tree: every vessel a group controls, or an operator's
   chain up to its ultimate parent. A trigger rejects cycles.
 - **Destination normalization** (`destination_hints`, every 15m) — resolves
@@ -153,17 +154,17 @@ GIST-assisted query reconciled idempotently into its table:
 
 - **Trajectory embeddings** (`pgvector`) — a nightly worker embeds each vessel's
   recent movement as a 64-d vector (`gridcell_v1`: a feature-hashed histogram of
-  the 1°×1° cells it visited), HNSW-indexed. `internal/api/similar` answers
+  the 1°×1° cells it visited), HNSW-indexed. `api/internal/api/similar` answers
   "vessels moving like this one"; an anomaly worker scores each vessel by mean
   cosine distance from its own history. See [docs/embeddings.md](docs/embeddings.md).
 - **AIS gap detection** (`ais_gaps`, every 30m) — flags recently-active vessels
   that go dark (excluding the truly gone and the in-port) and closes gaps on
   reappearance, tagging `reappeared_far` vs `reappeared_same_area`.
 - **LISTEN/NOTIFY alerts** — triggers `pg_notify` on geofence crossings, AIS
-  gaps, and more; `internal/notify` holds a dedicated LISTEN connection
+  gaps, and more; `api/internal/notify` holds a dedicated LISTEN connection
   (reconnecting on loss) and a router that fans events out to dispatch adapters
   (stdout, Telegram) with retry and a dead-letter table.
-- **Change data capture** (logical replication) — `internal/cdc` streams
+- **Change data capture** (logical replication) — `api/internal/cdc` streams
   inserts/updates on the high-signal tables out of a **wal2json** replication
   slot: durable and replayable, unlike NOTIFY. See
   [docs/replication.md](docs/replication.md) for the slot-management runbook.
@@ -180,16 +181,16 @@ table, and `SKIP LOCKED` makes each worker step over rows another worker has
 already locked instead of blocking on them. N workers drain the queue with no
 double-processing and no lock contention, using nothing but Postgres.
 
-`internal/workers/queue/naive/` contains a ~60-line hand-rolled version of the
+`api/internal/workers/queue/naive/` contains a ~60-line hand-rolled version of the
 same primitive, kept as a readable reference for what River does under the hood.
 River owns and versions its own schema (the `river_job` family), so those
 migrations run through River's migrator at startup rather than the golang-migrate
-set under `migrations/`.
+set under `api/migrations/`.
 
 ## API, live feed, and terminal
 
 The same binary that ingests and analyzes also serves everything on one port.
-`internal/api` is a [chi](https://github.com/go-chi/chi) router with a JSON
+`api/internal/api` is a [chi](https://github.com/go-chi/chi) router with a JSON
 `{data}` / `{error}` envelope, request IDs, structured request logging, a
 per-request timeout (everything except the long-lived `/ws/positions`), and CORS.
 
@@ -210,14 +211,14 @@ per-request timeout (everything except the long-lived `/ws/positions`), and CORS
 | GET | `/healthz` · `/readyz` · `/metrics` | liveness · readiness · Prometheus |
 
 **Live feed.** The writer's flush path hands each batch of fixes to a WebSocket
-hub (`internal/api/ws.go`). A client sends `{"type":"subscribe","bbox":[...]}`
+hub (`api/internal/api/ws.go`). A client sends `{"type":"subscribe","bbox":[...]}`
 with its map viewport; the hub pre-encodes each fix once and delivers only those
 inside the box. Per-subscriber queues are bounded, so a slow client's overflow is
 dropped and counted rather than stalling the broadcaster.
 
-**Terminal.** `ui/` is a Qwik app styled as a brutalist telemetry terminal,
+**Terminal.** `web/` is a Qwik app styled as a brutalist telemetry terminal,
 with a dark (CRT) and a light (print) theme that follow the OS preference and can
-be toggled from the header. It pre-renders to static files in `web/dist`, which
+be toggled from the header. It pre-renders to static files in `api/internal/webui/dist`, which
 the binary embeds with `go:embed` and serves from the root path, so there is no
 separate frontend service. It opens the WebSocket, plots live vessels on a
 Leaflet map (OpenStreetMap tiles), re-subscribes on pan/zoom, and drives the
@@ -225,7 +226,7 @@ event stream, vessel search (`/` to focus), the vessel record (track sparkline,
 operators, sanctions, anomaly, similar vessels), port and geofence overlays, and
 the in-view table off the REST API.
 
-**Metrics.** `internal/metrics` exposes a Prometheus endpoint. Rather than
+**Metrics.** `api/internal/metrics` exposes a Prometheus endpoint. Rather than
 threading a Prometheus dependency through the ingest, queue, and CDC packages, a
 custom collector reads their existing atomic-counter snapshots at scrape time.
 
@@ -246,7 +247,7 @@ A starter Grafana board lives at `deploy/grafana/dashboard.json`.
 
 ```sh
 make build          # build the terminal UI, then compile binaries into ./bin
-make ui             # build only the terminal into web/dist
+make ui             # build only the terminal into api/internal/webui/dist
 make ui-dev         # terminal with hot reload on :5173, proxying to the tracker on :8080
 make run            # run the tracker service
 make test           # run tests with the race detector
@@ -263,6 +264,7 @@ a plain `go build` without it embeds only an empty placeholder.
 Load the spatial reference data (after `make migrate-up`):
 
 ```sh
+cd api
 go run ./cmd/seed-ports -file wpi.csv        # World Port Index
 go run ./cmd/seed-eez   -file eez.geojson    # Marine Regions EEZs
 ```
@@ -271,12 +273,12 @@ Refresh the OFAC sanctions feed (writes the CSV the `file_fdw` foreign table
 reads — must be on the database server's filesystem — and refreshes the view):
 
 ```sh
-go run ./cmd/download-sanctions   # daily, via cron/systemd-timer
+cd api && go run ./cmd/download-sanctions   # daily, via cron/systemd-timer
 ```
 
 ### Configuration
 
-Configuration is read from the environment (see `internal/config`); copy
+Configuration is read from the environment (see `api/internal/config`); copy
 `.env.example` to `.env` to get started. Key vars:
 
 | Var | Default | Meaning |

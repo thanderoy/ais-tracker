@@ -2,8 +2,8 @@
 .env
 bin/
 plan/
-ui/node_modules/
-ui/server/
-ui/tmp/
-web/dist/*
-!web/dist/.gitkeep
+web/node_modules/
+web/server/
+web/tmp/
+api/internal/webui/dist/*
+!api/internal/webui/dist/.gitkeep
