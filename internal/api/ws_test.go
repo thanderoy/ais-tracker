@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -221,5 +222,38 @@ func TestHubDropsOnBackpressure(t *testing.T) {
 	}
 	if m.Dispatched+m.Dropped != 100 {
 		t.Fatalf("dispatched(%d)+dropped(%d) != 100", m.Dispatched, m.Dropped)
+	}
+}
+
+// TestPositionFeedOutlivesRequestTimeout checks that the router's per-request
+// timeout does not apply to the long-lived position feed: a client connected
+// past that deadline still receives fixes.
+func TestPositionFeedOutlivesRequestTimeout(t *testing.T) {
+	prev := requestTimeout
+	requestTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { requestTimeout = prev })
+
+	h := NewHub(nil)
+	defer h.Shutdown()
+	s := &Server{hub: h, logger: slog.Default()}
+	srv := httptest.NewServer(s.Handler())
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/ws/positions", nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.CloseNow() })
+
+	subscribe(t, c, [4]float64{-10, -10, 10, 10})
+	waitForSubscribers(t, h, 1)
+	time.Sleep(3 * requestTimeout)
+
+	h.Broadcast([]writer.PositionUpdate{{MMSI: 7, Lon: 1, Lat: 1, ReportedAt: time.Now()}})
+	p, ok := readPosition(t, c)
+	if !ok || p.MMSI != 7 {
+		t.Fatalf("feed closed after request timeout: got %+v ok=%v", p, ok)
 	}
 }

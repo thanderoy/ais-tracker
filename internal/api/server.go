@@ -19,7 +19,7 @@ import (
 
 // requestTimeout bounds any single handler; slow queries return 503 rather than
 // pinning a connection indefinitely.
-const requestTimeout = 15 * time.Second
+var requestTimeout = 15 * time.Second
 
 // ReadyCheck is a named readiness probe evaluated by GET /readyz. Returning an
 // error marks the service not-ready (503) with the check's name.
@@ -90,38 +90,42 @@ func (s *Server) Handler() http.Handler {
 	if s.httpMetrics != nil {
 		r.Use(s.httpMetrics)
 	}
-	r.Use(middleware.Timeout(requestTimeout))
-
-	r.Get("/healthz", s.handleLive)
-	r.Get("/readyz", s.handleReady)
-	if s.metricsHandler != nil {
-		r.Handle("/metrics", s.metricsHandler)
-	}
-
-	r.Route("/api", func(r chi.Router) {
-		r.Get("/vessels", s.handleVesselSearch)
-		r.Get("/vessels/{mmsi}", s.handleVesselDetail)
-		r.Get("/vessels/{mmsi}/positions", s.handleVesselPositions)
-		r.Get("/vessels/{mmsi}/similar", s.handleVesselSimilar)
-		r.Get("/ports", s.handlePorts)
-		r.Get("/ports/{id}/recent-calls", s.handleRecentCalls)
-		r.Get("/geofences", s.handleListGeofences)
-		r.Post("/geofences", s.handleCreateGeofence)
-		r.Get("/geofences/{id}/events", s.handleGeofenceEvents)
-		r.Get("/alerts", s.handleAlerts)
-		r.Get("/sts-events", s.handleSTSEvents)
-		r.Get("/ais-gaps", s.handleAISGaps)
-		r.Get("/docs", s.handleDocs)
-		r.Get("/openapi.json", s.handleOpenAPISpec)
-	})
-
+	// The position feed is a long-lived connection, so it sits outside the
+	// per-request timeout that bounds everything else.
 	if s.hub != nil {
 		r.Get("/ws/positions", s.hub.Serve)
 	}
 
-	if s.web != nil {
-		r.Handle("/*", http.FileServerFS(s.web))
-	}
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.Timeout(requestTimeout))
+
+		r.Get("/healthz", s.handleLive)
+		r.Get("/readyz", s.handleReady)
+		if s.metricsHandler != nil {
+			r.Handle("/metrics", s.metricsHandler)
+		}
+
+		r.Route("/api", func(r chi.Router) {
+			r.Get("/vessels", s.handleVesselSearch)
+			r.Get("/vessels/{mmsi}", s.handleVesselDetail)
+			r.Get("/vessels/{mmsi}/positions", s.handleVesselPositions)
+			r.Get("/vessels/{mmsi}/similar", s.handleVesselSimilar)
+			r.Get("/ports", s.handlePorts)
+			r.Get("/ports/{id}/recent-calls", s.handleRecentCalls)
+			r.Get("/geofences", s.handleListGeofences)
+			r.Post("/geofences", s.handleCreateGeofence)
+			r.Get("/geofences/{id}/events", s.handleGeofenceEvents)
+			r.Get("/alerts", s.handleAlerts)
+			r.Get("/sts-events", s.handleSTSEvents)
+			r.Get("/ais-gaps", s.handleAISGaps)
+			r.Get("/docs", s.handleDocs)
+			r.Get("/openapi.json", s.handleOpenAPISpec)
+		})
+
+		if s.web != nil {
+			r.Handle("/*", http.FileServerFS(s.web))
+		}
+	})
 
 	return r
 }

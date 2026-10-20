@@ -189,7 +189,7 @@ set under `migrations/`.
 The same binary that ingests and analyzes also serves everything on one port.
 `internal/api` is a [chi](https://github.com/go-chi/chi) router with a JSON
 `{data}` / `{error}` envelope, request IDs, structured request logging, a
-per-request timeout, and CORS.
+per-request timeout (everything except the long-lived `/ws/positions`), and CORS.
 
 | Method | Path | Returns |
 |---|---|---|
