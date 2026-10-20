@@ -1,5 +1,7 @@
-// Package web embeds the static dashboard assets so the tracker binary serves
-// the map UI with no separate frontend service and no build step.
+// Package web embeds the operator terminal so the tracker binary serves the UI
+// with no separate frontend service. The terminal is the Qwik app in ui/, which
+// pre-renders to static files in dist/ here; run `make ui` before building the
+// binary, otherwise only the placeholder in dist/ is embedded.
 package web
 
 import (
@@ -7,8 +9,16 @@ import (
 	"io/fs"
 )
 
-//go:embed index.html app.js style.css
+//go:embed all:dist
 var files embed.FS
 
-// FS is the embedded dashboard, rooted so index.html is served at "/".
-var FS fs.FS = files
+// FS is the embedded terminal, rooted so index.html is served at "/".
+var FS fs.FS = mustSub(files, "dist")
+
+func mustSub(f fs.FS, dir string) fs.FS {
+	sub, err := fs.Sub(f, dir)
+	if err != nil {
+		panic(err)
+	}
+	return sub
+}

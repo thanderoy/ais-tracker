@@ -1,8 +1,8 @@
 # ais-tracker
 
 A maritime intelligence platform that ingests live vessel positions, enriches
-and analyzes them, and serves the results through an HTTP + WebSocket API with a
-Leaflet map. It runs as **one Go binary against one Postgres instance**, with no
+and analyzes them, and serves the results through an HTTP + WebSocket API and a live operator
+terminal. It runs as **one Go binary against one Postgres instance**, with no
 other infrastructure.
 
 The design premise is that a single Postgres can cover storage, spatial
@@ -25,8 +25,8 @@ representative query and its scaling limits, in
   scoring, and dark-vessel (AIS gap) detection.
 - Pushes real-time alerts through LISTEN/NOTIFY and streams a durable change feed
   through logical replication.
-- Serves a REST API, a live WebSocket position feed, an embedded map dashboard,
-  and Prometheus metrics — all on one port.
+- Serves a REST API, a live WebSocket position feed, an embedded operator
+  terminal, and Prometheus metrics — all on one port.
 
 ## Postgres capability coverage
 
@@ -51,7 +51,8 @@ representative query and its scaling limits, in
 - **Database:** Postgres 16 with PostGIS, TimescaleDB, pgvector, `pg_trgm`,
   `postgres_fdw`, `wal2json`
 - **Runtime:** Docker Compose locally, a single static Go binary in prod
-- **Frontend:** vanilla JS + Leaflet, served from the Go binary via `embed.FS`
+- **Frontend:** [Qwik](https://qwik.dev) + Leaflet in `ui/`, pre-rendered to static
+  files and served from the Go binary via `embed.FS` (Node 20+ to build)
 
 ## Layout
 
@@ -67,13 +68,14 @@ internal/ingest/       source clients + writer
 internal/reference/    port + EEZ reference-data loaders
 internal/enrichment/   operator dedup + sanctions feed
 internal/workers/      queue workers
-internal/api/          HTTP + WebSocket handlers, REST store, dashboard mount
+internal/api/          HTTP + WebSocket handlers, REST store, terminal mount
 internal/metrics/      Prometheus registry + collector bridging atomic counters
 internal/notify/       LISTEN/NOTIFY listener + alert dispatch adapters
 internal/cdc/          wal2json logical replication consumer
 internal/config/       env config loader
 internal/log/          slog setup
-web/                   embedded Leaflet dashboard (HTML/CSS/JS via go:embed)
+ui/                    Qwik operator terminal (source)
+web/                   go:embed of the built terminal (ui/ builds into web/dist)
 migrations/            golang-migrate SQL files
 deploy/                docker-compose, Dockerfile, Grafana dashboard, backup
 docs/                  architecture, schema, and capability notes
@@ -184,7 +186,7 @@ River owns and versions its own schema (the `river_job` family), so those
 migrations run through River's migrator at startup rather than the golang-migrate
 set under `migrations/`.
 
-## API, live feed, and dashboard
+## API, live feed, and terminal
 
 The same binary that ingests and analyzes also serves everything on one port.
 `internal/api` is a [chi](https://github.com/go-chi/chi) router with a JSON
@@ -213,11 +215,15 @@ with its map viewport; the hub pre-encodes each fix once and delivers only those
 inside the box. Per-subscriber queues are bounded, so a slow client's overflow is
 dropped and counted rather than stalling the broadcaster.
 
-**Dashboard.** `web/` is a vanilla-JS Leaflet map embedded in the binary with
-`go:embed` and served from the root path, so there is no separate frontend
-service. It opens the WebSocket, plots live vessels, re-subscribes on pan/zoom,
-and drives search, vessel detail, geofence overlays, and the alert feed off the
-REST API.
+**Terminal.** `ui/` is a Qwik app styled as a brutalist telemetry terminal,
+with a dark (CRT) and a light (print) theme that follow the OS preference and can
+be toggled from the header. It pre-renders to static files in `web/dist`, which
+the binary embeds with `go:embed` and serves from the root path, so there is no
+separate frontend service. It opens the WebSocket, plots live vessels on a
+Leaflet map (OpenStreetMap tiles), re-subscribes on pan/zoom, and drives the
+event stream, vessel search (`/` to focus), the vessel record (track sparkline,
+operators, sanctions, anomaly, similar vessels), port and geofence overlays, and
+the in-view table off the REST API.
 
 **Metrics.** `internal/metrics` exposes a Prometheus endpoint. Rather than
 threading a Prometheus dependency through the ingest, queue, and CDC packages, a
@@ -239,7 +245,9 @@ A starter Grafana board lives at `deploy/grafana/dashboard.json`.
 ## Running
 
 ```sh
-make build          # compile binaries into ./bin
+make build          # build the terminal UI, then compile binaries into ./bin
+make ui             # build only the terminal into web/dist
+make ui-dev         # terminal with hot reload on :5173, proxying to the tracker on :8080
 make run            # run the tracker service
 make test           # run tests with the race detector
 make lint           # golangci-lint
@@ -249,7 +257,8 @@ make migrate-up     # apply migrations
 make compose-down   # stop the stack
 ```
 
-Then open http://localhost:8080 for the dashboard.
+Then open http://localhost:8080 for the terminal. `make build` needs Node 20+;
+a plain `go build` without it embeds only an empty placeholder.
 
 Load the spatial reference data (after `make migrate-up`):
 

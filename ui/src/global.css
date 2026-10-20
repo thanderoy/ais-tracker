@@ -1,0 +1,724 @@
+/* Brutalist telemetry terminal. Two palettes share one token set: a CRT-dark
+   watch-floor theme and a Swiss-print light theme. Components only ever read
+   the tokens, so the theme switch is a single attribute on <html>. */
+
+:root,
+[data-theme="dark"] {
+  --bg: #0c0c0c;
+  --fg: #eaeaea;
+  --line: #2a2a2a;
+  --muted: #9a9a9a;
+  --sub: #1e1e1e;
+  --cross: #3a3a3a;
+  --hot: #1a0c0b;
+  --live: #4af626;
+  --accent: #ff3b30;
+  --on-accent: #0c0c0c;
+  --scan: rgba(0, 0, 0, 0.28);
+  --tiles: grayscale(1) invert(1) brightness(0.8) contrast(1.2);
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg: #f4f4f0;
+  --fg: #111111;
+  --line: #111111;
+  --muted: #55554f;
+  --sub: #d6d5cf;
+  --cross: #a8a79f;
+  --hot: #fbe1de;
+  --live: #1e7a12;
+  --accent: #d0140f;
+  --on-accent: #f4f4f0;
+  --scan: rgba(0, 0, 0, 0.035);
+  --tiles: grayscale(1) contrast(1.1) brightness(1.02);
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+body {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input {
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: 0;
+  background: none;
+  padding: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---------- Frame ---------- */
+
+.t-root {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--line);
+}
+
+.t-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
+}
+
+.t-cell {
+  background: var(--bg);
+}
+
+.t-title {
+  margin: 0;
+  padding: 12px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.t-title small {
+  font-size: inherit;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.hot {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.macro {
+  font-family: "Archivo Black", sans-serif;
+  font-weight: 400;
+  letter-spacing: -0.03em;
+}
+
+/* ---------- Header ---------- */
+
+.t-brand {
+  padding: 12px 16px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+}
+
+.t-command {
+  position: relative;
+  flex: 1 1 360px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  min-height: 44px;
+}
+
+.t-command input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  outline: none;
+}
+
+.t-command input::placeholder {
+  color: var(--muted);
+}
+
+.t-command kbd {
+  font: inherit;
+  color: var(--muted);
+  border: 1px solid var(--cross);
+  padding: 0 6px;
+}
+
+.t-results {
+  position: absolute;
+  z-index: 1100;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 1px 0 0;
+  padding: 0;
+  list-style: none;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.t-results button {
+  width: 100%;
+  text-align: left;
+  padding: 10px 16px;
+  display: grid;
+  grid-template-columns: 110px 1fr auto;
+  gap: 12px;
+}
+
+.t-results li + li {
+  border-top: 1px solid var(--sub);
+}
+
+.t-results button:hover,
+.t-results button:focus-visible {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.t-results .empty {
+  padding: 10px 16px;
+  color: var(--muted);
+}
+
+.t-status {
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.t-link-live {
+  color: var(--live);
+}
+
+.t-link-down {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.t-theme {
+  padding: 12px 16px;
+  min-height: 44px;
+}
+
+.t-theme:hover {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+/* ---------- Readout ---------- */
+
+.t-sector {
+  flex: 999 1 520px;
+  padding: 20px 20px 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.t-sector h1 {
+  margin: 0;
+  font-size: clamp(36px, 5.2vw, 88px);
+  line-height: 0.88;
+  text-transform: uppercase;
+}
+
+.t-counters {
+  flex: 1 1 520px;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+}
+
+.t-counters > div {
+  background: var(--bg);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.t-counters dt {
+  color: var(--muted);
+}
+
+.t-counters dd {
+  margin: 0;
+  font-size: 40px;
+}
+
+.t-counters > .is-alert {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.t-counters > .is-alert dt {
+  color: inherit;
+  font-weight: 700;
+}
+
+@media (max-width: 640px) {
+  .t-counters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ---------- Event stream ---------- */
+
+.t-stream {
+  flex: 1 1 300px;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.t-stream ol {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0;
+  overflow-y: auto;
+  max-height: 560px;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.t-stream li button {
+  width: 100%;
+  text-align: left;
+  padding: 6px 16px;
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 8px;
+}
+
+.t-stream li button:hover {
+  background: var(--sub);
+}
+
+.t-stream li.is-hot button {
+  background: var(--hot);
+}
+
+.t-stream .empty {
+  padding: 12px 16px;
+  color: var(--muted);
+}
+
+.t-foot {
+  margin-top: auto;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+}
+
+/* ---------- Map ---------- */
+
+.t-map {
+  flex: 999 1 480px;
+  min-width: 0;
+  position: relative;
+  min-height: 560px;
+  overflow: hidden;
+}
+
+.t-map-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.t-scan {
+  position: absolute;
+  inset: 0;
+  z-index: 450;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent 0,
+    transparent 2px,
+    var(--scan) 2px,
+    var(--scan) 4px
+  );
+}
+
+.t-layers {
+  position: absolute;
+  z-index: 1000;
+  top: 0;
+  left: 0;
+  display: flex;
+  gap: 1px;
+  background: var(--line);
+}
+
+.t-layers button {
+  background: var(--bg);
+  padding: 0 12px;
+  min-height: 44px;
+}
+
+.t-layers button[aria-pressed="true"] {
+  background: var(--fg);
+  color: var(--bg);
+  font-weight: 700;
+}
+
+.t-coords {
+  position: absolute;
+  z-index: 1000;
+  left: 0;
+  bottom: 0;
+  background: var(--bg);
+  padding: 6px 12px;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+}
+
+.leaflet-container {
+  background: var(--bg);
+  font: inherit;
+}
+
+.leaflet-tile-pane {
+  filter: var(--tiles);
+}
+
+.leaflet-bar,
+.leaflet-touch .leaflet-bar {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--line);
+}
+
+.leaflet-bar a,
+.leaflet-touch .leaflet-bar a {
+  width: 44px;
+  height: 44px;
+  line-height: 44px;
+  border: 0;
+  border-radius: 0 !important;
+  background: var(--bg);
+  color: var(--fg);
+  font: 400 16px "JetBrains Mono", monospace;
+}
+
+.leaflet-bar a:hover {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.leaflet-top.leaflet-right .leaflet-control {
+  margin: 0;
+}
+
+.leaflet-control-attribution {
+  background: var(--bg) !important;
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.leaflet-control-attribution a {
+  color: var(--fg);
+}
+
+.leaflet-attribution-flag {
+  display: none !important;
+}
+
+.leaflet-tooltip {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: none;
+  font: inherit;
+}
+
+.leaflet-tooltip::before {
+  display: none;
+}
+
+.t-vessel svg {
+  display: block;
+  fill: var(--fg);
+  overflow: visible;
+}
+
+.t-vessel.is-flagged svg {
+  fill: var(--accent);
+}
+
+.t-pick {
+  border: 1.5px solid var(--fg);
+}
+
+.t-pick::before,
+.t-pick::after {
+  content: "";
+  position: absolute;
+  background: var(--fg);
+}
+
+.t-pick::before {
+  left: 50%;
+  top: -8px;
+  bottom: -8px;
+  width: 1px;
+}
+
+.t-pick::after {
+  top: 50%;
+  left: -8px;
+  right: -8px;
+  height: 1px;
+}
+
+path.t-port {
+  stroke: var(--fg);
+  fill: var(--bg);
+}
+
+path.t-fence {
+  stroke: var(--fg);
+  stroke-dasharray: 2 4;
+  fill: var(--fg);
+  fill-opacity: 0.04;
+}
+
+/* ---------- Record ---------- */
+
+.t-record {
+  flex: 1 1 300px;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+}
+
+.t-record .name {
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.t-record .name div:first-child {
+  font-size: 28px;
+  line-height: 0.95;
+}
+
+.t-record dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+}
+
+.t-record dl > div {
+  background: var(--bg);
+  padding: 10px 16px;
+  min-width: 0;
+}
+
+.t-record dl > .wide {
+  grid-column: span 2;
+}
+
+.t-record dt {
+  color: var(--muted);
+}
+
+.t-record dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.t-record dd.big {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.t-record .block {
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.t-record .spark {
+  width: 100%;
+  height: 60px;
+  display: block;
+  margin-top: 8px;
+}
+
+.t-record .spark .base {
+  stroke: var(--cross);
+}
+
+.t-record .spark .series {
+  fill: none;
+  stroke: var(--fg);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.t-record .similar {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.t-record .similar button {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  text-align: left;
+}
+
+.t-record .similar button:hover {
+  color: var(--accent);
+}
+
+.t-actions {
+  margin-top: auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border-top: 1px solid var(--line);
+}
+
+.t-actions button {
+  min-height: 44px;
+  background: var(--bg);
+  letter-spacing: 0.06em;
+}
+
+.t-actions button.primary,
+.t-actions button[aria-pressed="true"] {
+  background: var(--fg);
+  color: var(--bg);
+  font-weight: 700;
+}
+
+.t-record .empty {
+  padding: 16px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+/* ---------- Table ---------- */
+
+.t-table {
+  overflow-x: auto;
+}
+
+.t-table table {
+  width: 100%;
+  min-width: 860px;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.t-table th {
+  text-align: left;
+  font-weight: 400;
+  color: var(--muted);
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.t-table td {
+  padding: 0;
+}
+
+.t-table td button,
+.t-table td span {
+  display: block;
+  width: 100%;
+  text-align: inherit;
+  padding: 7px 16px;
+}
+
+.t-table .num {
+  text-align: right;
+}
+
+.t-table tbody tr + tr {
+  border-top: 1px solid var(--sub);
+}
+
+.t-table tbody tr:hover {
+  background: var(--sub);
+}
+
+.t-table tbody tr.is-selected {
+  background: var(--fg);
+  color: var(--bg);
+  font-weight: 700;
+}
+
+.t-table .empty {
+  padding: 12px 16px;
+  color: var(--muted);
+}
+
+.t-footer {
+  padding: 8px 16px;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+
+.t-footer .end {
+  margin-left: auto;
+}
+
+@media (max-width: 900px) {
+  .t-stream,
+  .t-record {
+    max-width: none;
+  }
+}
