@@ -1,0 +1,59 @@
+name: CI / Deploy
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: api/go.mod
+          cache-dependency-path: api/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # Builds the terminal first, so this also proves the embedded UI builds.
+      - name: Build
+        run: make build
+
+      - name: Vet
+        working-directory: api
+        run: go vet ./...
+
+  deploy:
+    name: Deploy to ganymede
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    concurrency:
+      group: deploy-ais-tracker
+      cancel-in-progress: false
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          # Check out main first so the merged commit ships even if the checkout
+          # was left on another branch; deploy.sh pulls, builds and waits for health.
+          script: |
+            set -e
+            cd /apps/ais-tracker
+            git checkout main
+            deploy/deploy.sh

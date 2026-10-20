@@ -78,7 +78,7 @@ api/                   Go service (module github.com/thanderoy/ais-tracker/api)
   internal/webui/        go:embed of the built terminal (web/ builds into dist/ here)
   migrations/            golang-migrate SQL files
 web/                   Qwik operator terminal (source)
-deploy/                docker-compose, Dockerfile, Grafana dashboard, backup
+deploy/                docker-compose, deploy + backup scripts, Grafana dashboard, Postgres image
 docs/                  architecture, schema, and capability notes
 ```
 
@@ -305,6 +305,43 @@ with Traefik labels for TLS and host routing. The tracker image (`Dockerfile`) i
 a multi-stage build onto distroless static — about 15 MB, no shell — so the
 compose healthcheck calls a `tracker healthcheck` subcommand rather than `curl`.
 `deploy/backup.sh` runs a retained `pg_dump` on a schedule.
+
+### ganymede (ais.roythan.de)
+
+Production runs on `ganymede` behind the shared Traefik from the
+[infrastructure repo](https://github.com/thanderoy/infrastructure), and onboards
+the same way every other stack there does: through labels alone, with nothing
+changed in the infrastructure repo.
+
+- **Ingress:** the tracker joins `traefik-public` and its router serves
+  `ais.roythan.de` (`TRACKER_HOST`) on the `https` entrypoint, with a Let's
+  Encrypt certificate from the `le` resolver. `/metrics` is excluded from the
+  public router.
+- **Observability:** every container carries `logging: promtail` and
+  `stackname: ais-tracker`, so Alloy ships their logs to Loki. The tracker and
+  the Postgres exporter also carry `prometheus.scrape` labels and join the
+  `monitoring` network, so Alloy scrapes them as jobs `ais-tracker` and
+  `ais-tracker-postgres`.
+- **Limits:** Postgres and the tracker are memory-capped (`POSTGRES_MEM_LIMIT`,
+  `TRACKER_MEM_LIMIT`) because the host is shared and has no swap.
+
+First-time setup on the host. The Traefik and monitoring stacks must already be
+running, since they create the `traefik-public` and `monitoring` networks:
+
+```sh
+ssh ganymede
+git clone https://github.com/thanderoy/ais-tracker.git /apps/ais-tracker
+cd /apps/ais-tracker
+cp .env.example .env   # set a strong POSTGRES_PASSWORD; AISSTREAM_API_KEY if you have one
+deploy/deploy.sh
+```
+
+`deploy/deploy.sh` pulls, builds both images with `git describe` stamped in,
+recreates the stack (the migrator runs before the tracker starts), and waits for
+the tracker's healthcheck. It's idempotent. After that, every push to `main`
+deploys automatically: `.github/workflows/ci.yml` builds the UI and binaries on
+every push, then on `main` runs `deploy/deploy.sh` on the host over SSH. That
+needs the repository secrets `VM_HOST`, `VM_USER` and `VM_SSH_KEY`.
 
 ## Documentation
 

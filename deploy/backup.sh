@@ -9,12 +9,14 @@
 # Usage: deploy/backup.sh [retention_days]
 #   BACKUP_DIR   destination directory (default ./backups)
 #   COMPOSE_FILE compose file to target (default deploy/docker-compose.yml)
+#   ENV_FILE     env file the compose file interpolates (default .env, the repo root)
 #   PG_SERVICE   compose service name (default postgres)
 #   POSTGRES_USER / POSTGRES_DB  credentials (default ais / ais)
 set -euo pipefail
 
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
 COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker-compose.yml}"
+ENV_FILE="${ENV_FILE:-.env}"
 PG_SERVICE="${PG_SERVICE:-postgres}"
 PGUSER="${POSTGRES_USER:-ais}"
 PGDB="${POSTGRES_DB:-ais}"
@@ -25,7 +27,7 @@ stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 out="$BACKUP_DIR/ais-$stamp.dump"
 
 echo "backing up $PGDB -> $out"
-docker compose -f "$COMPOSE_FILE" exec -T "$PG_SERVICE" \
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$PG_SERVICE" \
   pg_dump --format=custom --no-owner --username "$PGUSER" "$PGDB" > "$out"
 
 # Fail loudly on an empty/truncated dump rather than silently keeping junk.

@@ -105,8 +105,9 @@ flowchart LR
     Traefik -->|Host rule, TLS| Tracker[tracker container]
     Tracker --> Postgres[(Postgres container)]
     Exporter[postgres-exporter] --> Postgres
-    Prometheus --> Tracker
-    Prometheus --> Exporter
+    Alloy -->|scrape| Tracker
+    Alloy -->|scrape| Exporter
+    Alloy --> Prometheus
     Grafana --> Prometheus
     Backup[backup.sh cron] --> Postgres
 ```
@@ -117,7 +118,10 @@ tracker, and a Postgres metrics exporter. Traefik terminates TLS
 and routes by host to the tracker's single port. The tracker image is a
 distroless static build of about 15 MB; the dashboard ships inside it, so there
 is no separate frontend service and no CDN to manage beyond the map tiles the
-browser loads. Prometheus scrapes `/metrics` on the tracker and the exporter;
-`backup.sh` runs `pg_dump` on a schedule. See
+browser loads. It runs on `ganymede` at `ais.roythan.de`, where Traefik and the
+monitoring stack come from the infrastructure repo: Alloy discovers the tracker
+and the exporter by their `prometheus.scrape` labels, scrapes `/metrics` over the
+shared `monitoring` network and remote-writes to Prometheus. `deploy/deploy.sh`
+ships a release and `backup.sh` runs `pg_dump` on a schedule. See
 [postgres-capabilities.md](postgres-capabilities.md) for what each Postgres
 feature does and [replication.md](replication.md) for the CDC slot runbook.
