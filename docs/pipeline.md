@@ -54,9 +54,12 @@ GIST-assisted query reconciled idempotently into its table:
 - **Geofence crossings** (`geofence_events`, every 1m) — walks positions with
   `LAG` over inside/outside state against user-defined watch polygons and records
   enter/exit events, firing `NOTIFY 'geofence_events'` for each.
-- **Ship-to-ship transfers** (`sts_events`, every 10m) — a spatial self-join
-  finds vessel pairs held within 500m and under 3kn for 30+ minutes, excluding
-  pier-side vessels inside a port polygon.
+- **Ship-to-ship transfers** (`sts_events`, every 10m) — recent slow positions
+  are snapshotted, one per vessel per 5-minute bucket, into a GiST-indexed temp
+  table; a spatial self-join over it finds vessel pairs held within 500m and
+  under 3kn for 30+ minutes, excluding pier-side vessels inside a port polygon.
+  The scan skips until ports are seeded, since without them every moored pair
+  would match.
 
 ## Search, dedup, hierarchies, sanctions
 
