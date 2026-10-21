@@ -125,11 +125,13 @@ go run ./cmd/seed-ports -file wpi.csv        # World Port Index
 go run ./cmd/seed-eez   -file eez.geojson    # Marine Regions EEZs
 ```
 
-Refresh the OFAC sanctions feed (writes the CSV the `file_fdw` foreign table
-reads — must be on the database server's filesystem — and refreshes the view):
+The OFAC sanctions feed needs no setup: the tracker's daily `sanctions_refresh`
+job downloads it, writes the CSV the `file_fdw` foreign table reads (through the
+database connection, so it lands on the server's filesystem), and refreshes the
+view. To refresh it by hand:
 
 ```sh
-cd api && go run ./cmd/download-sanctions   # daily, via cron/systemd-timer
+cd api && go run ./cmd/download-sanctions   # -local sdn.csv to just inspect it
 ```
 
 ### Configuration
@@ -199,6 +201,20 @@ deploys automatically: `.github/workflows/ci.yml` builds the UI and binaries on
 every push, then on `main` runs `deploy/deploy.sh` on the host over SSH. That
 needs the repository secrets `VM_HOST`, `VM_USER` and `VM_SSH_KEY`, and the
 checkout at the path the workflow's deploy step `cd`s into.
+
+Load the port and EEZ reference data once after the first deploy. Ship-to-ship
+detection stays off until ports are loaded. The image carries the seed tools;
+run them through the `migrate` service, which has the database URL and sits
+only on the internal network:
+
+```sh
+curl -fLo wpi.csv 'https://msi.nga.mil/api/publications/download?type=view&key=16920959/SFH00000/UpdatedPub150.csv'
+docker compose --env-file .env -f deploy/docker-compose.yml --profile prod run --rm --no-deps \
+  -v "$PWD/wpi.csv:/data/wpi.csv:ro" --entrypoint /usr/local/bin/seed-ports migrate -file /data/wpi.csv
+```
+
+`seed-eez` runs the same way with `-file` pointing at a Marine Regions EEZ
+GeoJSON, which has to be downloaded by hand from marineregions.org.
 
 ## Documentation
 

@@ -26,12 +26,16 @@ COPY --from=ui /src/api/internal/webui/dist ./internal/webui/dist
 ARG VERSION=dev
 ENV CGO_ENABLED=0 GOOS=linux
 RUN go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/tracker ./cmd/tracker \
- && go build -trimpath -ldflags "-s -w" -o /out/migrate ./cmd/migrate
+ && for cmd in migrate seed-ports seed-eez download-sanctions; do \
+      go build -trimpath -ldflags "-s -w" -o /out/$cmd ./cmd/$cmd || exit 1; \
+    done
 
 # Distroless static: no shell, no package manager, just the binary and CA certs.
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/tracker /usr/local/bin/tracker
 COPY --from=build /out/migrate /usr/local/bin/migrate
+# Reference-data tools, run on demand with `docker compose run --entrypoint`.
+COPY --from=build /out/seed-ports /out/seed-eez /out/download-sanctions /usr/local/bin/
 # Migrations are applied by a one-shot job/command; ship the SQL alongside.
 COPY --from=build /src/migrations /migrations
 

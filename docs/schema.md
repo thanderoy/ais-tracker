@@ -1,7 +1,7 @@
 # Schema
 
 The full schema lives in `api/migrations/` as ordered golang-migrate files
-(`000001`–`000025`). River owns and versions its own `river_job` tables through
+(`000001`–`000026`). River owns and versions its own `river_job` tables through
 its migrator, so those are not in this set. This page is the map and the
 commentary on the non-obvious choices; the migrations are the source of truth.
 

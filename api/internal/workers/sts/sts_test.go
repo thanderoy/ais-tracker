@@ -58,14 +58,6 @@ func TestSTSDetection(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	// A port at (20,20) so the pier-side pair sits inside a polygon.
-	if _, err := pool.Exec(ctx, `
-INSERT INTO ports (wpi_id, name, country, centroid, polygon)
-VALUES ('P','Port','PP', ST_MakePoint(20,20)::geography,
-        ST_Buffer(ST_MakePoint(20,20)::geography, 2000)::geography)`); err != nil {
-		t.Fatalf("seed port: %v", err)
-	}
-
 	// 5001/5002: ~110m apart and slow for 40 min, then 5002 drifts off fast.
 	seedTrack(ctx, t, pool, 5001, 40, 0, 10.0, 10.0, 1.0)
 	seedTrack(ctx, t, pool, 5002, 40, 5, 10.001, 10.0, 0.8)
@@ -80,6 +72,28 @@ VALUES ('P','Port','PP', ST_MakePoint(20,20)::geography,
 	seedTrack(ctx, t, pool, 7002, 10, 0, 30.001, 30.0, 1.0)
 
 	w := NewScanWorker(pool, quietLogger(), defaultLookback)
+
+	// With no port polygons loaded every moored pair would read as a transfer,
+	// so the scan must skip rather than record anything.
+	if err := w.Work(ctx, &river.Job[ScanArgs]{}); err != nil {
+		t.Fatalf("work without ports: %v", err)
+	}
+	var early int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM sts_events`).Scan(&early); err != nil {
+		t.Fatal(err)
+	}
+	if early != 0 {
+		t.Fatalf("sts_events = %d before ports were loaded, want 0", early)
+	}
+
+	// A port at (20,20) so the pier-side pair sits inside a polygon.
+	if _, err := pool.Exec(ctx, `
+INSERT INTO ports (wpi_id, name, country, centroid, polygon)
+VALUES ('P','Port','PP', ST_MakePoint(20,20)::geography,
+        ST_Buffer(ST_MakePoint(20,20)::geography, 2000)::geography)`); err != nil {
+		t.Fatalf("seed port: %v", err)
+	}
+
 	if err := w.Work(ctx, &river.Job[ScanArgs]{}); err != nil {
 		t.Fatalf("work: %v", err)
 	}
