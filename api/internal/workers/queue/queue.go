@@ -50,6 +50,35 @@ func (r *Registry) AddPeriodic(jobs ...*river.PeriodicJob) {
 	r.periodic = append(r.periodic, jobs...)
 }
 
+// dailyCutoff separates the scans deduplicated per period from the frequent
+// ones deduplicated per in-flight run (see PeriodicOpts).
+const dailyCutoff = time.Hour
+
+// inFlight are the states of a job that hasn't finished yet.
+var inFlight = []rivertype.JobState{
+	rivertype.JobStateAvailable,
+	rivertype.JobStatePending,
+	rivertype.JobStateRetryable,
+	rivertype.JobStateRunning,
+	rivertype.JobStateScheduled,
+}
+
+// PeriodicOpts returns insert options that stop a periodic scan from stacking
+// up. Without them every tick inserts a new job, so when workers fall behind,
+// or River re-elects a leader (which re-fires RunOnStart), copies of the same
+// scan pile up and then run concurrently against the database.
+//
+// Scans that tick at least hourly are unique per period: one run per window,
+// however often the leader changes. More frequent scans are unique while a run
+// is in flight, so a tick that lands while the previous run is still queued or
+// working is skipped rather than queued behind it.
+func PeriodicOpts(interval time.Duration) *river.InsertOpts {
+	if interval >= dailyCutoff {
+		return &river.InsertOpts{UniqueOpts: river.UniqueOpts{ByPeriod: interval}}
+	}
+	return &river.InsertOpts{UniqueOpts: river.UniqueOpts{ByState: inFlight}}
+}
+
 // Option registers workers and periodic jobs at construction time.
 type Option func(*Registry)
 

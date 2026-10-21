@@ -8,10 +8,15 @@ import (
 )
 
 // NewPool creates a pgx connection pool from a DSN and verifies connectivity.
-func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+// maxConns sizes the pool; zero keeps pgx's default of max(4, NumCPU), which
+// suits the one-shot commands but not the long-running service.
+func NewPool(ctx context.Context, dsn string, maxConns int32) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("db: parse config: %w", err)
+	}
+	if maxConns > 0 {
+		cfg.MaxConns = maxConns
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)

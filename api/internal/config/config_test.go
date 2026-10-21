@@ -12,6 +12,7 @@ func clearEnv(t *testing.T) {
 	for _, k := range []string{
 		"APP_ENV", "DATABASE_URL", "HTTP_PORT",
 		"LOG_LEVEL", "LOG_FORMAT", "SHUTDOWN_GRACE_SECONDS", "AISSTREAM_API_KEY",
+		"WORKER_POOL_SIZE", "DB_MAX_CONNS", "RAW_RETENTION_HOURS",
 	} {
 		t.Setenv(k, "")
 	}
@@ -33,6 +34,34 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.ShutdownGrace != 30*time.Second {
 		t.Errorf("ShutdownGrace = %v, want 30s", cfg.ShutdownGrace)
+	}
+	if want := cfg.WorkerPoolSize + dbConnHeadroom; cfg.DBMaxConns != want {
+		t.Errorf("DBMaxConns = %d, want %d", cfg.DBMaxConns, want)
+	}
+	if cfg.RawRetention != 48*time.Hour {
+		t.Errorf("RawRetention = %v, want 48h", cfg.RawRetention)
+	}
+}
+
+func TestLoadPoolFollowsWorkers(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://ais:ais@localhost:5432/ais")
+	t.Setenv("WORKER_POOL_SIZE", "4")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.DBMaxConns != 4+dbConnHeadroom {
+		t.Errorf("DBMaxConns = %d, want %d", cfg.DBMaxConns, 4+dbConnHeadroom)
+	}
+
+	t.Setenv("DB_MAX_CONNS", "8")
+	if cfg, err = Load(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.DBMaxConns != 8 {
+		t.Errorf("DBMaxConns = %d, want the explicit 8", cfg.DBMaxConns)
 	}
 }
 
@@ -86,6 +115,11 @@ func TestLoadInvalidValues(t *testing.T) {
 			name: "bad log format",
 			env:  map[string]string{"DATABASE_URL": "postgres://x/y", "LOG_FORMAT": "xml"},
 			want: "LOG_FORMAT must be one of",
+		},
+		{
+			name: "retention under an hour",
+			env:  map[string]string{"DATABASE_URL": "postgres://x/y", "RAW_RETENTION_HOURS": "0"},
+			want: "RAW_RETENTION_HOURS must be at least 1",
 		},
 	}
 	for _, tc := range tests {

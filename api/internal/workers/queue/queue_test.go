@@ -87,3 +87,60 @@ func TestQueueHelloJobEndToEnd(t *testing.T) {
 		t.Fatalf("run returned error: %v", err)
 	}
 }
+
+func TestPeriodicOptsSkipDuplicates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping container-backed queue test in -short mode")
+	}
+	ctx := context.Background()
+
+	dsn, cleanup, err := testsupport.StartPostgres(ctx)
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(cleanup)
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("river migrate: %v", err)
+	}
+
+	// The client is never started, so inserted jobs stay available: exactly the
+	// backlog a starved worker pool or a re-elected leader would build.
+	q, err := New(pool, Config{}, quietLogger())
+	if err != nil {
+		t.Fatalf("new queue: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		interval time.Duration
+	}{
+		{"frequent scan, unique while in flight", time.Minute},
+		{"daily scan, unique per period", 24 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for i := range 3 {
+				res, err := q.client.Insert(ctx, HelloArgs{Name: tc.name}, PeriodicOpts(tc.interval))
+				if err != nil {
+					t.Fatalf("insert %d: %v", i, err)
+				}
+				if want := i > 0; res.UniqueSkippedAsDuplicate != want {
+					t.Errorf("insert %d: skipped = %v, want %v", i, res.UniqueSkippedAsDuplicate, want)
+				}
+			}
+		})
+	}
+
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM river_job WHERE kind = 'hello'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("hello jobs = %d, want one per uniqueness rule", n)
+	}
+}

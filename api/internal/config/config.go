@@ -20,9 +20,15 @@ type Config struct {
 	ShutdownGrace    time.Duration // bounded graceful-shutdown window
 	AISStreamAPIKey  string        // optional; anonymous connections allowed
 	WorkerPoolSize   int           // River worker concurrency per queue
+	DBMaxConns       int           // pgx pool size; defaults to WorkerPoolSize plus headroom
+	RawRetention     time.Duration // how long raw AIS messages are kept
 	TelegramBotToken string        // optional; enables the Telegram alert adapter
 	TelegramChatID   string        // optional; target chat for Telegram alerts
 }
+
+// dbConnHeadroom is the connections reserved beyond the River workers: the
+// ingest writer, API requests, and River's leader election and completer.
+const dbConnHeadroom = 10
 
 // loader accumulates validation errors so Load reports every problem at once
 // rather than failing on the first.
@@ -87,6 +93,8 @@ func Load() (*Config, error) {
 		ShutdownGrace:    time.Duration(l.optionalInt("SHUTDOWN_GRACE_SECONDS", 30)) * time.Second,
 		AISStreamAPIKey:  os.Getenv("AISSTREAM_API_KEY"),
 		WorkerPoolSize:   l.optionalInt("WORKER_POOL_SIZE", 10),
+		DBMaxConns:       l.optionalInt("DB_MAX_CONNS", 0),
+		RawRetention:     time.Duration(l.optionalInt("RAW_RETENTION_HOURS", 48)) * time.Hour,
 		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramChatID:   os.Getenv("TELEGRAM_CHAT_ID"),
 	}
@@ -101,6 +109,20 @@ func Load() (*Config, error) {
 	}
 	if cfg.WorkerPoolSize < 1 {
 		l.fail("WORKER_POOL_SIZE must be at least 1, got %d", cfg.WorkerPoolSize)
+	}
+
+	// Every busy worker holds a connection, and the writer, the API, and River's
+	// own leader election and job completion need theirs on top. pgx's default
+	// of max(4, NumCPU) starves them, and the timeouts that follow make River
+	// drop and re-elect its leader.
+	if cfg.DBMaxConns == 0 {
+		cfg.DBMaxConns = cfg.WorkerPoolSize + dbConnHeadroom
+	}
+	if cfg.DBMaxConns < 1 {
+		l.fail("DB_MAX_CONNS must be at least 1, got %d", cfg.DBMaxConns)
+	}
+	if cfg.RawRetention < time.Hour {
+		l.fail("RAW_RETENTION_HOURS must be at least 1, got %d", int(cfg.RawRetention/time.Hour))
 	}
 
 	if len(l.errs) > 0 {
