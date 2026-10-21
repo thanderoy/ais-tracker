@@ -93,7 +93,7 @@ func Register(pool *pgxpool.Pool, logger *slog.Logger, interval time.Duration) q
 		river.AddWorker(r.Workers(), NewScanWorker(pool, logger))
 		r.AddPeriodic(river.NewPeriodicJob(
 			river.PeriodicInterval(interval),
-			func() (river.JobArgs, *river.InsertOpts) { return ScanArgs{}, nil },
+			func() (river.JobArgs, *river.InsertOpts) { return ScanArgs{}, queue.PeriodicOpts(interval) },
 			&river.PeriodicJobOpts{RunOnStart: true},
 		))
 	}

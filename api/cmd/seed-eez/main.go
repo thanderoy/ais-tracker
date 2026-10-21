@@ -59,7 +59,7 @@ func run(args []string) int {
 	}
 
 	ctx := context.Background()
-	pool, err := db.NewPool(ctx, dbURL)
+	pool, err := db.NewPool(ctx, dbURL, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "seed-eez: %v\n", err)
 		return 1

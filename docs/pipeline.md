@@ -21,6 +21,13 @@ positions into per-vessel tracks. `vessel_last_position` is a separate UNLOGGED
 cache rebuilt from the archive on startup, keeping the hot "where is it now"
 lookups out of the WAL.
 
+`raw_ais_messages` is the fastest-growing table, since every message lands there
+as JSONB under a GIN index: a global feed adds gigabytes a day. Nothing reads it
+more than a day back, so an hourly worker (`api/internal/workers/retention`)
+deletes rows older than `RAW_RETENTION_HOURS` (48 by default) in batches, found
+through a BRIN index on `received_at`. Positions have their own 90-day
+TimescaleDB retention policy.
+
 ## Spatial analytics (PostGIS)
 
 Every position carries a `geog geography(Point, 4326)` alongside its raw
@@ -96,12 +103,21 @@ GIST-assisted query reconciled idempotently into its table:
 Work that doesn't belong on the hot ingest path — vessel enrichment, gap
 backfill, port-call detection, geofence evaluation, ship-to-ship transfer
 detection, destination normalization, sanctions matching, trajectory
-embedding, anomaly scoring, and AIS-gap detection — runs on a Postgres-backed
+embedding, anomaly scoring, AIS-gap detection, and raw-message retention — runs on a Postgres-backed
 job queue via [River](https://riverqueue.com/). River is built on `SELECT ...
 FOR UPDATE SKIP LOCKED`: many workers concurrently claim rows from the jobs
 table, and `SKIP LOCKED` makes each worker step over rows another worker has
 already locked instead of blocking on them. N workers drain the queue with no
 double-processing and no lock contention, using nothing but Postgres.
+
+Every periodic scan is inserted with uniqueness options (`queue.PeriodicOpts`),
+so scans can't pile up. Scans that run hourly or less often are unique per
+period, so they run once per window even when River re-elects its leader and
+re-fires the run-on-start jobs. More frequent scans are unique while a run is
+in flight, so a tick that lands while the previous run is still queued or
+working is skipped. The connection pool is sized above the worker count
+(`DB_MAX_CONNS`), because workers holding every connection starve the
+writer and River's own leader election.
 
 `api/internal/workers/queue/naive/` contains a ~60-line hand-rolled version of the
 same primitive, kept as a readable reference for what River does under the hood.

@@ -38,6 +38,7 @@ import (
 	"github.com/thanderoy/ais-tracker/api/internal/workers/geofence"
 	"github.com/thanderoy/ais-tracker/api/internal/workers/portcall"
 	"github.com/thanderoy/ais-tracker/api/internal/workers/queue"
+	"github.com/thanderoy/ais-tracker/api/internal/workers/retention"
 	"github.com/thanderoy/ais-tracker/api/internal/workers/sanctions"
 	"github.com/thanderoy/ais-tracker/api/internal/workers/sts"
 )
@@ -105,7 +106,7 @@ func run() int {
 
 	logger.Info("service starting", "app_env", cfg.AppEnv, "http_port", cfg.HTTPPort)
 
-	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
+	pool, err := db.NewPool(ctx, cfg.DatabaseURL, int32(cfg.DBMaxConns))
 	if err != nil {
 		logger.Error("database connection failed", "err", err)
 		return exitFatalError
@@ -135,6 +136,7 @@ func run() int {
 		embed.Register(pool, logger, 24*time.Hour, 7*24*time.Hour, 50),
 		anomaly.Register(pool, logger, 24*time.Hour),
 		gaps.Register(pool, logger, 30*time.Minute, 6*time.Hour, 72*time.Hour),
+		retention.Register(pool, logger, time.Hour, cfg.RawRetention),
 	)
 	if err != nil {
 		logger.Error("job queue init failed", "err", err)

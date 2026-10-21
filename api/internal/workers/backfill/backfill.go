@@ -140,7 +140,7 @@ func Register(pool *pgxpool.Pool, logger *slog.Logger, scanInterval time.Duratio
 		river.AddWorker(r.Workers(), NewPositionsWorker(logger))
 		r.AddPeriodic(river.NewPeriodicJob(
 			river.PeriodicInterval(scanInterval),
-			func() (river.JobArgs, *river.InsertOpts) { return ScanArgs{}, nil },
+			func() (river.JobArgs, *river.InsertOpts) { return ScanArgs{}, queue.PeriodicOpts(scanInterval) },
 			&river.PeriodicJobOpts{RunOnStart: true},
 		))
 	}

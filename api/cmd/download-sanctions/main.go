@@ -74,7 +74,7 @@ func run(args []string) int {
 		return 2
 	}
 	ctx := context.Background()
-	pool, err := db.NewPool(ctx, dbURL)
+	pool, err := db.NewPool(ctx, dbURL, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "download-sanctions: %v\n", err)
 		return 1
