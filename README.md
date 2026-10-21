@@ -125,11 +125,13 @@ go run ./cmd/seed-ports -file wpi.csv        # World Port Index
 go run ./cmd/seed-eez   -file eez.geojson    # Marine Regions EEZs
 ```
 
-Refresh the OFAC sanctions feed (writes the CSV the `file_fdw` foreign table
-reads — must be on the database server's filesystem — and refreshes the view):
+The OFAC sanctions feed needs no setup: the tracker's daily `sanctions_refresh`
+job downloads it, writes the CSV the `file_fdw` foreign table reads (through the
+database connection, so it lands on the server's filesystem), and refreshes the
+view. To refresh it by hand:
 
 ```sh
-cd api && go run ./cmd/download-sanctions   # daily, via cron/systemd-timer
+cd api && go run ./cmd/download-sanctions   # -local sdn.csv to just inspect it
 ```
 
 ### Configuration

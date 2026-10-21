@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,18 +37,31 @@ func TestSanctionsTagging(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	// Populate the sanctions feed (server-side CSV + refresh).
-	if _, err := pool.Exec(ctx, `
-COPY (
-  SELECT * FROM (VALUES
-    ('101','SONATA','Vessel','IRAN-EO','','EPRS3','Crude Oil Tanker','','','IR','NITC'),
-    ('102','ADRIAN DARYA','Vessel','SDGT','','9HA5119','Crude Oil Tanker','','','PA','IRISL')
-  ) t(ent_num,sdn_name,sdn_type,program,title,call_sign,vess_type,tonnage,grt,vess_flag,vess_owner)
-) TO '/tmp/ais_sanctions_ofac.csv' WITH (FORMAT csv, HEADER true)`); err != nil {
-		t.Fatalf("write csv: %v", err)
+	// Before the feed is loaded the view is unpopulated; the scan must skip
+	// rather than fail and retry.
+	if err := NewScanWorker(pool, quietLogger()).Work(ctx, &river.Job[ScanArgs]{}); err != nil {
+		t.Fatalf("scan before feed: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `REFRESH MATERIALIZED VIEW sanctions_vessels`); err != nil {
+
+	// Load the feed the way production does: the refresh job downloads a raw
+	// OFAC-style SDN file (lowercase types, "-0-" empties), writes it for the
+	// foreign table, and refreshes the view.
+	sdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `101,"SONATA","vessel","IRAN-EO",-0- ,"EPRS3","Crude Oil Tanker",-0- ,-0- ,"IR","NITC",-0-
+102,"ADRIAN DARYA","vessel","SDGT",-0- ,"9HA5119","Crude Oil Tanker",-0- ,-0- ,"PA","IRISL",-0-
+103,"SONATA SMITH","individual","SDNTK",-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,-0-
+`)
+	}))
+	t.Cleanup(sdn.Close)
+	if err := NewRefreshWorker(pool, quietLogger(), sdn.URL).Work(ctx, &river.Job[RefreshArgs]{}); err != nil {
 		t.Fatalf("refresh: %v", err)
+	}
+	var listed int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM sanctions_vessels`).Scan(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if listed != 2 {
+		t.Fatalf("sanctions_vessels = %d, want 2 (vessels only)", listed)
 	}
 
 	// Vessels: name match, call-sign match, and an innocent one.

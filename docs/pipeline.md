@@ -80,7 +80,9 @@ GIST-assisted query reconciled idempotently into its table:
 - **Sanctions via FDW** — the OFAC SDN list is a `file_fdw` foreign table
   projected to the `sanctions_vessels` materialized view; a daily worker
   (`vessel_sanctions`) trigram/call-sign matches vessels against it.
-  `download-sanctions` refreshes the feed.
+  A daily `sanctions_refresh` job re-downloads the feed, writes the CSV through
+  the database connection (`lo_export`), refreshes the view, and queues a scan;
+  `download-sanctions` does the same on demand.
 
 ## Vectors, real-time alerts, CDC
 

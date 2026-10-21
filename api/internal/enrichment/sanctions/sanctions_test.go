@@ -52,15 +52,16 @@ func TestRefreshAndQuery(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	// Write the foreign-table CSV server-side (ais is superuser), then refresh.
-	if _, err := pool.Exec(ctx, `
-COPY (
-  SELECT * FROM (VALUES
-    ('101','SONATA','Vessel','IRAN-EO','','EPRS3','Crude Oil Tanker','','','IR','NITC'),
-    ('102','ADRIAN DARYA','Vessel','SDGT','','9HA5119','Crude Oil Tanker','','','PA','IRISL'),
-    ('103','John Smith','Individual','SDNTK','Mr','','','','','','')
-  ) t(ent_num,sdn_name,sdn_type,program,title,call_sign,vess_type,tonnage,grt,vess_flag,vess_owner)
-) TO '/tmp/ais_sanctions_ofac.csv' WITH (FORMAT csv, HEADER true)`); err != nil {
+	// Write the foreign-table CSV through the connection, as the refresh job does.
+	raw := `101,"SONATA","vessel","IRAN-EO",-0- ,"EPRS3","Crude Oil Tanker",-0- ,-0- ,"IR","NITC",-0-
+102,"ADRIAN DARYA","vessel","SDGT",-0- ,"9HA5119","Crude Oil Tanker",-0- ,-0- ,"PA","IRISL",-0-
+103,"John Smith","individual","SDNTK","Mr",-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,-0-
+`
+	csv, err := TransformSDN(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("transform: %v", err)
+	}
+	if err := Write(ctx, pool, csv, FDWPath); err != nil {
 		t.Fatalf("write server-side csv: %v", err)
 	}
 
