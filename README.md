@@ -145,7 +145,7 @@ Configuration is read from the environment (see `api/internal/config`); copy
 | `AISSTREAM_API_KEY` | — | AISStream feed key (anonymous if unset) |
 | `WORKER_POOL_SIZE` | `10` | River worker concurrency per queue |
 | `DB_MAX_CONNS` | workers + 10 | Postgres connection pool size; the headroom covers the writer, the API, and River's own bookkeeping |
-| `RAW_RETENTION_HOURS` | `48` | how long raw AIS messages are kept before the hourly prune deletes them |
+| `RAW_RETENTION_HOURS` | `24` | how long raw AIS messages are kept before the hourly prune drops their chunks |
 | `LOG_LEVEL` / `LOG_FORMAT` | `info` / `text` | structured logging |
 | `SHUTDOWN_GRACE_SECONDS` | `30` | bounded graceful-shutdown window |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | — | enable the Telegram alert adapter (both required) |

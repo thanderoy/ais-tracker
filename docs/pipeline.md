@@ -22,11 +22,15 @@ cache rebuilt from the archive on startup, keeping the hot "where is it now"
 lookups out of the WAL.
 
 `raw_ais_messages` is the fastest-growing table, since every message lands there
-as JSONB under a GIN index: a global feed adds gigabytes a day. Nothing reads it
-more than a day back, so an hourly worker (`api/internal/workers/retention`)
-deletes rows older than `RAW_RETENTION_HOURS` (48 by default) in batches, found
-through a BRIN index on `received_at`. Positions have their own 90-day
-TimescaleDB retention policy.
+as JSONB under a GIN index: a global feed adds over 10 GB a day. Nothing reads it
+more than a day back, so it is a hypertable with hourly chunks and an hourly
+worker (`api/internal/workers/retention`) drops chunks older than
+`RAW_RETENTION_HOURS` (24 by default). Dropping chunks returns the disk at once,
+where batched `DELETE`s left the files at their peak size.
+
+Positions are compressed after 2 days and dropped after 30; `voyage_hourly` is
+compressed after 7 days and dropped after 30 too. Nothing reads further back
+than a week.
 
 ## Spatial analytics (PostGIS)
 

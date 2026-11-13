@@ -33,10 +33,11 @@ func TestPruneDeletesOnlyExpiredMessages(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	// More expired rows than one batch, so the sweep has to loop.
+	// Expired rows spread over several hourly chunks, so the sweep drops many.
 	if _, err := pool.Exec(ctx, `
 INSERT INTO raw_ais_messages (source, message_type, mmsi, received_at, payload)
-SELECT 't', 1, g, now() - interval '3 days', '{}'::jsonb FROM generate_series(1, $1) g`, batchSize+5); err != nil {
+SELECT 't', 1, g, now() - interval '3 days' - make_interval(mins => g % 300), '{}'::jsonb
+FROM generate_series(1, 1000) g`); err != nil {
 		t.Fatalf("seed expired: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -46,6 +47,10 @@ SELECT 't', 5, g, now() - interval '1 hour', '{}'::jsonb FROM generate_series(1,
 	}
 
 	w := NewPruneWorker(pool, quietLogger(), 48*time.Hour)
+	var before int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM show_chunks('raw_ais_messages')`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
 	if err := w.Work(ctx, &river.Job[PruneArgs]{}); err != nil {
 		t.Fatalf("work: %v", err)
 	}
@@ -62,5 +67,12 @@ FROM raw_ais_messages`).Scan(&expired, &recent); err != nil {
 	}
 	if recent != 10 {
 		t.Errorf("recent rows = %d, want 10", recent)
+	}
+	var after int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM show_chunks('raw_ais_messages')`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != 1 || before < 5 {
+		t.Errorf("chunks before/after = %d/%d, want several dropped down to the 1 recent chunk", before, after)
 	}
 }
