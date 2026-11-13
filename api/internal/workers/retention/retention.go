@@ -3,7 +3,9 @@
 // is the fastest-growing table by far (gigabytes a day on a global feed), while
 // nothing reads it beyond a day back: enrichment looks up a vessel's latest
 // static report minutes after first sighting, and destination normalization
-// scans the last 24 hours. A periodic worker deletes older rows in batches.
+// scans the last 24 hours. The table is a hypertable with hourly chunks, so a
+// periodic worker drops whole chunks past the window: the disk comes back at
+// once and there are no dead rows left for vacuum.
 package retention
 
 import (
@@ -20,22 +22,16 @@ import (
 
 const (
 	defaultInterval  = time.Hour
-	defaultRetention = 48 * time.Hour
-	batchSize        = 20000
+	defaultRetention = 24 * time.Hour
 )
 
-// pruneSQL deletes one batch of messages received before the cutoff. Batching
-// keeps each transaction short, so a large first prune doesn't hold locks or
-// build one huge WAL burst. The BRIN index on received_at finds the old rows.
+// pruneSQL drops every chunk that ends before the cutoff and returns how many
+// it dropped. A chunk straddling the cutoff stays until the next sweep, so
+// messages live up to an hour past the window.
 //
-// $1 = retention, $2 = batch size.
+// $1 = retention.
 const pruneSQL = `
-DELETE FROM raw_ais_messages
-WHERE id IN (
-  SELECT id FROM raw_ais_messages
-  WHERE received_at < now() - $1::interval
-  LIMIT $2
-)`
+SELECT count(*) FROM drop_chunks('raw_ais_messages', older_than => now() - $1::interval)`
 
 // PruneArgs triggers a prune sweep.
 type PruneArgs struct{}
@@ -62,25 +58,18 @@ func NewPruneWorker(pool *pgxpool.Pool, logger *slog.Logger, retention time.Dura
 	return &PruneWorker{pool: pool, logger: logger, retention: retention}
 }
 
-// Timeout bounds a single sweep. A backlog bigger than one sweep can clear is
-// picked up by the next one.
-func (w *PruneWorker) Timeout(*river.Job[PruneArgs]) time.Duration { return 10 * time.Minute }
+// Timeout bounds a single sweep. Dropping chunks is a catalog operation, so
+// this only matters if the lock waits on a long query.
+func (w *PruneWorker) Timeout(*river.Job[PruneArgs]) time.Duration { return 5 * time.Minute }
 
-// Work deletes batches until one comes back short, meaning nothing old is left.
+// Work drops the expired chunks.
 func (w *PruneWorker) Work(ctx context.Context, _ *river.Job[PruneArgs]) error {
-	var total int64
-	for {
-		tag, err := w.pool.Exec(ctx, pruneSQL, w.retention, batchSize)
-		if err != nil {
-			return fmt.Errorf("prune raw messages: %w", err)
-		}
-		total += tag.RowsAffected()
-		if tag.RowsAffected() < batchSize {
-			break
-		}
+	var dropped int64
+	if err := w.pool.QueryRow(ctx, pruneSQL, w.retention).Scan(&dropped); err != nil {
+		return fmt.Errorf("prune raw messages: %w", err)
 	}
-	if total > 0 {
-		w.logger.Info("raw retention prune", "deleted", total, "retention", w.retention)
+	if dropped > 0 {
+		w.logger.Info("raw retention prune", "chunks_dropped", dropped, "retention", w.retention)
 	}
 	return nil
 }

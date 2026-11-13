@@ -38,8 +38,8 @@ func TestLoadDefaults(t *testing.T) {
 	if want := cfg.WorkerPoolSize + dbConnHeadroom; cfg.DBMaxConns != want {
 		t.Errorf("DBMaxConns = %d, want %d", cfg.DBMaxConns, want)
 	}
-	if cfg.RawRetention != 48*time.Hour {
-		t.Errorf("RawRetention = %v, want 48h", cfg.RawRetention)
+	if cfg.RawRetention != 24*time.Hour {
+		t.Errorf("RawRetention = %v, want 24h", cfg.RawRetention)
 	}
 }
 

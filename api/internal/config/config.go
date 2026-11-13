@@ -94,7 +94,7 @@ func Load() (*Config, error) {
 		AISStreamAPIKey:  os.Getenv("AISSTREAM_API_KEY"),
 		WorkerPoolSize:   l.optionalInt("WORKER_POOL_SIZE", 10),
 		DBMaxConns:       l.optionalInt("DB_MAX_CONNS", 0),
-		RawRetention:     time.Duration(l.optionalInt("RAW_RETENTION_HOURS", 48)) * time.Hour,
+		RawRetention:     time.Duration(l.optionalInt("RAW_RETENTION_HOURS", 24)) * time.Hour,
 		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramChatID:   os.Getenv("TELEGRAM_CHAT_ID"),
 	}
