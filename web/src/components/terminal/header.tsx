@@ -81,7 +81,14 @@ export const Header = component$(() => {
 
   return (
     <header class="t-row">
-      <div class="t-cell t-brand">[ AIS-TRACKER ] // TERM 01</div>
+      <div class="t-cell t-brand">
+        <svg class="t-logo" viewBox="0 0 32 32" aria-hidden="true">
+          <path class="lit" d="M16 4L9 18h7z M8 18h16l-3 7H11z" />
+          <path class="fold" d="M16 4l7 14h-7z M2 18h6l3 7z M30 18h-6l-3 7z" />
+          <rect class="wake" x="3" y="27" width="26" height="2" />
+        </svg>
+        [ AIS-TRACKER ] // TERM 01
+      </div>
       <form class="t-cell t-command" role="search" preventdefault:submit onSubmit$={() => run()}>
         <span aria-hidden="true" class="hot">
           &gt;
