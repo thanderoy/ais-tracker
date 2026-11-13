@@ -144,6 +144,27 @@ button {
   font-weight: 700;
   display: flex;
   align-items: center;
+  gap: 10px;
+}
+
+/* Paper boat: lit and folded faces plus a red waterline, drawn from the theme
+   tokens so it flips with the palette. */
+.t-logo {
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+
+.t-logo .lit {
+  fill: var(--fg);
+}
+
+.t-logo .fold {
+  fill: var(--muted);
+}
+
+.t-logo .wake {
+  fill: var(--accent);
 }
 
 .t-command {
